@@ -1,0 +1,189 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Runtime;
+using Ge = Autodesk.AutoCAD.Geometry;
+using OpenCvSharp;
+using OpenCVSharp_Test.Function; 
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Forms;
+using Application = Autodesk.AutoCAD.ApplicationServices.Application;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using Autodesk.AutoCAD.Windows;
+using Practicing;
+using System.IO;
+using Autodesk.AutoCAD.Colors;
+using Autodesk.AutoCAD.Internal;
+using Color = Autodesk.AutoCAD.Colors.Color;
+using Autodesk.AutoCAD.Geometry;
+using Window = OpenCvSharp.Window;
+
+
+namespace OpenCVSharp_Test
+{
+    public class ObtainInnerContourByBoxSelectingEntities
+    {
+        [CommandMethod("neilun")]
+        public void Run()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor editor = doc.Editor;
+            Database db = HostApplicationServices.WorkingDatabase;
+
+
+            try
+            {
+
+                using (doc.LockDocument())
+                {
+                    var ents = BasicFunction.GetEntitiesInSelection(doc);
+
+                    List<Extents3d> extensions = ents.Select(x => x.GeometricExtents).ToList();
+                    List<Autodesk.AutoCAD.Geometry.Point3d> points = new List<Autodesk.AutoCAD.Geometry.Point3d>();
+                    foreach (Extents3d item in extensions)
+                    {
+                        Autodesk.AutoCAD.Geometry.Point3d p1 = item.MinPoint;
+                        Autodesk.AutoCAD.Geometry.Point3d p2 = item.MaxPoint;
+                        points.Add(p1);
+                        points.Add(p2);
+                    }
+                    List<double> p_x = points.Select(x => x.X).ToList();
+                    List<double> p_y = points.Select(y => y.Y).ToList();
+                    var xMin = (int)(p_x.OrderBy(x => x).First());
+                    var xMax = (int)(p_x.OrderByDescending(x => x).First());
+                    var yMin = (int)(p_y.OrderBy(x => x).First());
+                    var yMax = (int)(p_y.OrderByDescending(x => x).First());
+                    var minP = new Autodesk.AutoCAD.Geometry.Point3d(xMin, yMin, 0);
+                    var maxP = new Autodesk.AutoCAD.Geometry.Point3d(xMax, yMax, 0);
+                    int width = (int)(maxP.X) - (int)(minP.X)+100;
+                    int height = (int)(maxP.Y) - (int)(minP.Y)+100;
+                    var 左上角点 = new Autodesk.AutoCAD.Geometry.Point3d(minP.X, minP.Y + height, 0);
+                    var 右下角点 = new Autodesk.AutoCAD.Geometry.Point3d(maxP.X, maxP.Y - height, 0);
+                    int interval = 10;
+
+                    List<Autodesk.AutoCAD.Geometry.Point3d> outlines = new List<Autodesk.AutoCAD.Geometry.Point3d>();
+                    List<Autodesk.AutoCAD.Geometry.Point3d> outlinesModified = new List<Autodesk.AutoCAD.Geometry.Point3d>();
+                    foreach (Entity entity in ents)
+                    {
+                        if (entity is Curve curve)
+                        {
+                            var distance = curve.GetDistanceAtParameter(curve.EndParam)
+                                - curve.GetDistanceAtParameter(curve.StartParam);
+                            int n = (int)distance / interval; // 整数除法只保留整数部分
+
+                            for (int i = 0; i <= n; i++)
+                            {
+                                var p = curve.GetPointAtDist(i * interval);
+                                outlines.Add(p);
+                                var pM = new Autodesk.AutoCAD.Geometry.Point3d(p.X - 左上角点.X, -p.Y + 左上角点.Y, 0);
+                                outlinesModified.Add(pM);
+                            }
+
+
+                        }
+                    }
+                    // 创建一个指定大小的白色画布,好像画布的面积不能特别大
+                    Mat image = new Mat(new OpenCvSharp.Size(width, height), MatType.CV_8UC3, new Scalar(255, 255, 255));
+                    foreach (var p in outlinesModified)
+                    {
+                        var px = (int)p.X; var py = (int)p.Y;
+                        if (px >= width || py >= height) continue;
+                        //image.Set<Vec3b>(py, px, new Vec3b(0, 0, 0));
+                        Cv2.Circle(image, new OpenCvSharp.Point(px, py), 10, new Scalar(0, 0, 0));
+
+                    }
+
+
+                    // 查找图像中的轮廓
+                    //image.ConvertTo(image, MatType.CV_32SC1);
+                    Mat imageGray = new Mat();
+                    Mat binaryImage = new Mat();
+                    Mat imgEroded = new Mat();
+                    Mat imgDilated = new Mat();
+                    Cv2.CvtColor(image, imageGray, ColorConversionCodes.BGR2GRAY);
+                    var size = new OpenCvSharp.Size(5, 5);
+                    Mat element = Cv2.GetStructuringElement(MorphShapes.Rect, size);
+                    Cv2.Erode(imageGray, imgEroded, element, null,2);
+                    //Cv2.Dilate(binaryImage, imgDilated, element, null, 1);
+
+                    Cv2.AdaptiveThreshold(imgEroded, binaryImage, 255, AdaptiveThresholdTypes.MeanC, ThresholdTypes.BinaryInv, 11, 2);
+                    //Cv2.Threshold(image, binaryImage, 127, 255, ThresholdTypes.Binary);
+                    OpenCvSharp.Point[][] contours ;
+                    HierarchyIndex[] hierarchy;
+                    List<OpenCvSharp.Point[]> innerContours =new List<OpenCvSharp.Point[]>();
+                    
+                    Cv2.FindContours(binaryImage, out contours, out hierarchy, RetrievalModes.Tree, ContourApproximationModes.ApproxNone);
+                    for (int i = 0; i < contours.Count(); i++)
+                    {
+                        if (hierarchy[i].Child ==-1 )
+                        {
+                            //var approxCurve = new Mat();
+                            //var inputContour = InputArray.Create(contours[i]);
+                            //Cv2.ApproxPolyDP(inputContour, approxCurve, 100, true);
+                            //OpenCvSharp.Point[] points_;  approxCurve.GetArray(out points_);
+                            //innerContours.Add(points_);
+                            innerContours.Add(contours[i]);
+                        }
+                    }
+
+
+                    // 将图片的像素轮廓转换为cad的point3d点
+                    List<List<Ge.Point3d>> contours_cad = new List<List<Ge.Point3d>>();
+                    foreach (var contour in innerContours)
+                    {
+                        List<Ge.Point3d> contour_cad = new List<Ge.Point3d>();
+
+                        foreach (var point in contour)
+                        {
+                            //Point3d(p.X - 左上角点.X, -p.Y + 左上角点.Y, 0)
+                            Ge.Point3d point3d = new Ge.Point3d(
+                                point.X + 左上角点.X,
+                                -point.Y + 左上角点.Y,
+                                0
+                                );
+                            contour_cad.Add(point3d);
+                        }
+                        BasicFunction.WriteMessage(doc, $"now length is :{contour_cad.Count}");
+                        contours_cad.Add(contour_cad);
+
+                    }
+                    // 7、在cad中画出轮廓线
+                    List<Polyline> polylines = new List<Polyline>();
+                    foreach (var contour_cad in contours_cad)
+                    {
+                        Polyline polyline = new Polyline();
+                        for (int i = 0; i < contour_cad.Count; i++)
+                        {
+                            polyline.AddVertexAt(i, new Ge.Point2d(contour_cad[i].X, contour_cad[i].Y), 0, 0, 0);
+                        }
+                        polyline.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByColor, 1);
+                        polyline.Closed = true;
+                        polylines.Add(polyline);
+                        BasicFunction.ToModelSpace(doc, polyline);
+                    }
+
+                }
+
+
+
+
+
+            }
+            catch (System.Exception ex)
+            {
+                string msg = "报错为：" + ex.Message + "\n" + "位置为：" + ex.StackTrace;
+                BasicFunction.WriteMessage(doc, msg);
+            }
+
+        }
+
+    }
+}
