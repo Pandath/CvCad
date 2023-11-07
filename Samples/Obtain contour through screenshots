@@ -3,6 +3,7 @@ using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Runtime;
 using OpenCvSharp;
+using OpenCVSharp_Test.Function;
 using System;
 using System.Collections.Generic;
 using System.Linq;
