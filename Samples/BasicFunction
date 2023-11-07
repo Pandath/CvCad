@@ -1,0 +1,1682 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.Colors;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Geometry;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace OpenCVSharp_Test.Function
+{
+    public class BasicFunction
+    {
+        public static List<Entity> GetEntitiesInSelection(Document doc)
+        {
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+            List<Entity> entities = new List<Entity>(); 
+
+            PromptSelectionResult result = ed.GetSelection();
+            if (result.Status != PromptStatus.OK)
+                return entities;
+
+            SelectionSet selSet = result.Value;
+            if (selSet == null || selSet.Count == 0)
+                return entities;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                foreach (SelectedObject selObj in selSet)
+                {
+                    Entity ent = tr.GetObject(selObj.ObjectId, OpenMode.ForRead) as Entity;
+                    if (ent != null)
+                    {
+                        entities.Add(ent);
+                    }
+                }
+                tr.Commit();
+            }
+            return entities;
+        }
+        /// <summary>
+        /// 只有布局才有Viewport
+        /// </summary>
+        /// <param name="doc"></param>
+        /// <param name="layout"></param>
+        /// <returns></returns>
+        public static List<Viewport> GetViewport(Document doc, Layout layout)
+        {
+            List<Viewport> viewportList = new List<Viewport>();
+            Database db=doc.Database;
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                if (layout != null)
+                {
+                    //BasicFunction.WriteMessage(doc, $"layout为：{layout.LayoutName}");
+                    BlockTableRecord btr = (BlockTableRecord)trans.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+
+                    // 遍历BlockTableRecord的Entities找到Viewport类型的对象
+                    foreach (ObjectId id in btr)
+                    {
+                        DBObject obj = trans.GetObject(id, OpenMode.ForRead);
+                        Viewport vp = obj as Viewport;
+                        if (vp != null)
+                        {
+                            //BasicFunction.WriteMessage(doc, $"width: {vp.Width} height:{vp.Height}");
+                            viewportList.Add(vp);
+                        }
+                    }
+                }
+
+            }
+            return viewportList;
+
+
+        }
+        public static T GetClosestEntityToLine_ByGripPoint<T>(Document doc, Line line, List<T> entities) where T : Entity
+        {
+            Dictionary<T, Point3d> entity_GripPoint = new Dictionary<T, Point3d>();
+            foreach (var item in entities)
+            {
+                entity_GripPoint.Add(item, BasicFunction.GetGripPoint(item));
+            }
+            Dictionary<T, double> entity_Distance = new Dictionary<T, double>();
+            foreach (var item in entity_GripPoint)
+            {
+                entity_Distance.Add(item.Key, BasicFunction.GetDistance_PointToLine(doc, item.Value, line));
+            }
+            entity_Distance = entity_Distance.OrderBy(x => x.Value).ToDictionary(x => x.Key, x => x.Value);
+            return entity_Distance.First().Key;
+
+        }
+        public static T GetClosestEntityToLine_ByGripPoint<T>(Document doc, Xline line, List<T> entities) where T : MText
+        {
+            Dictionary<T, Point3d> entity_GripPoint = new Dictionary<T, Point3d>();
+            foreach (var item in entities)
+            {
+                entity_GripPoint.Add(item, BasicFunction.GetGripPoint(item));
+            }
+            Dictionary<T, double> entity_Distance = new Dictionary<T, double>();
+
+            foreach (var item in entity_GripPoint)
+            {
+                entity_Distance.Add(item.Key, BasicFunction.GetDistance_PointToLine(doc, item.Value, line));
+            }
+            entity_Distance = entity_Distance.OrderBy(x => x.Value).ToDictionary(x => x.Key, x => x.Value);
+            return entity_Distance.First().Key;
+
+        }
+
+        public static double GetDistance_PointToLine(Document doc, Point3d point, Line line)
+        {
+            Point3d lineStartPoint = line.StartPoint;
+            Point3d lineEndPoint = line.EndPoint;
+
+            // 将线段转换为向量
+            Vector3d lineVector = lineEndPoint - lineStartPoint;
+
+            // 将点与线起点构成的向量
+            Vector3d pointVector = point - lineStartPoint;
+
+            // 计算点到线的投影长度
+            double projectionLength = pointVector.DotProduct(lineVector) / lineVector.Length;
+
+            // 如果投影长度小于等于0，则点到线的距离为点到线起点的距离
+            if (projectionLength <= 0)
+            {
+                return point.DistanceTo(lineStartPoint);
+            }
+
+            // 如果投影长度大于等于线段长度，则点到线的距离为点到线终点的距离
+            if (projectionLength >= lineVector.Length)
+            {
+                return point.DistanceTo(lineEndPoint);
+            }
+
+            // 计算点到投影点的距离
+            Point3d projectionPoint = lineStartPoint + lineVector.GetNormal().MultiplyBy(projectionLength);
+            return point.DistanceTo(projectionPoint);
+        }
+        public static double GetDistance_PointToLine(Document doc, Point3d point, Xline line_)
+        {
+            Line perpendicularLine = new Line(point, line_.GetClosestPointTo(point, true));
+            return perpendicularLine.Length;
+        }
+
+        public static List<string> GetLayerNames(Document doc)
+        {
+            List<string> layerNames = new List<string>();
+
+            using (Transaction tr = doc.TransactionManager.StartTransaction())
+            {
+                LayerTable lt = tr.GetObject(doc.Database.LayerTableId, OpenMode.ForRead) as LayerTable;
+
+                foreach (ObjectId layerId in lt)
+                {
+                    LayerTableRecord ltr = tr.GetObject(layerId, OpenMode.ForRead) as LayerTableRecord;
+                    layerNames.Add(ltr.Name);
+                }
+
+                tr.Commit();
+            }
+
+            return layerNames;
+        }
+        public static void ResetStartPointOfPolyline(Document doc, Polyline polyline_in, Point3d point)
+        {
+            Database database = doc.Database;
+            Point3d startPoint_original = polyline_in.StartPoint;
+            Point3d endPoint_original = polyline_in.EndPoint;
+            double to_startPoint_original = point.DistanceTo(startPoint_original);
+            double to_endPoint_original = point.DistanceTo(endPoint_original);
+            if (to_startPoint_original <= to_endPoint_original)
+            {
+
+            }
+            else
+            {
+                using (Transaction trans = database.TransactionManager.StartTransaction())
+                {
+                    Polyline polyline = (Polyline)trans.GetObject(polyline_in.ObjectId, OpenMode.ForWrite);
+
+                    if (polyline.Closed)
+                    {
+                        // 如果多段线是闭合的，起点和终点不能交换
+                        doc.Editor.WriteMessage("\n无法交换起点和终点，因为多段线是闭合的。");
+                        return;
+                    }
+
+                    //int numVertices = polyline.NumberOfVertices;
+
+                    // 交换起点和终点
+                    //Point3d temp = polyline.GetPoint3dAt(0);
+                    //polyline.SetPointAt(numVertices - 1, temp);
+                    //polyline.SetPointAt(0, polyline.GetPoint3dAt(numVertices - 1));
+
+                    //polyline.SetPointAt(0, new Point2d(endPoint_original.X, endPoint_original.Y));
+                    //polyline.SetPointAt(numVertices - 1, new Point2d(startPoint_original.X, startPoint_original.Y));
+                    polyline.ReverseCurve();
+                    trans.Commit();
+                }
+            }
+        }
+        /// <summary>
+        /// 将点集中距离较近的两个点成对打包成数组的列表，输出
+        /// </summary>
+        /// <returns></returns>
+        public static List<Point3d> GetTwoClosePoints(Polyline polyline, List<Point3d> intersectedPoints_现状道路_flattened, double 道路最大间距, bool is_单线_现状道路, out List<Point3d[]> 成对点集_现状道路)
+        {
+            if (!is_单线_现状道路)
+            {
+                成对点集_现状道路 = new List<Point3d[]>();
+                List<Point3d> 成对点集的中点_现状道路 = new List<Point3d>();
+                foreach (var point_现状道路 in intersectedPoints_现状道路_flattened)
+                {
+                    foreach (var point_现状道路2 in intersectedPoints_现状道路_flattened)
+                    {
+                        if (point_现状道路 != point_现状道路2)
+                        {
+                            if (point_现状道路.DistanceTo(point_现状道路2) <= 道路最大间距)
+                            {
+                                Point3d[] 成对点 = new Point3d[2] { point_现状道路, point_现状道路2 };
+                                成对点集_现状道路.Add(成对点);
+
+                                double para1 = polyline.GetParameterAtPoint(point_现状道路);
+                                double para2 = polyline.GetParameterAtPoint(point_现状道路2);
+                                double para_mid = (para1 + para2) / 2;
+                                Point3d mid = polyline.GetPointAtParameter(para_mid);
+
+                                //Point3d mid = new Point3d
+                                //    (
+                                //    0.5 * (point_现状道路.X + point_现状道路2.X)
+                                //    , 0.5 * (point_现状道路.Y + point_现状道路2.Y)
+                                //    , 0.5 * (point_现状道路.Z + point_现状道路2.Z)
+                                //    );
+                                成对点集的中点_现状道路.Add(mid);
+                            }
+                        }
+                    }
+                }
+                return 成对点集的中点_现状道路;
+            }
+            else
+            {
+                成对点集_现状道路 = new List<Point3d[]>();
+                return intersectedPoints_现状道路_flattened;
+            }
+
+        }
+        public static Point3d GetPointViaClick(Document doc)
+        {
+            Editor ed = doc.Editor;
+            Point3d pickedPoint = new Point3d();
+            PromptPointOptions opts = new PromptPointOptions("\n请选择一个点：");
+            PromptPointResult res = ed.GetPoint(opts);
+
+            if (res.Status == PromptStatus.OK)
+            {
+                pickedPoint = res.Value;
+
+                // 在控制台输出所选点的坐标
+                //ed.WriteMessage($"\n所选点的坐标为：X={pickedPoint.X}, Y={pickedPoint.Y}, Z={pickedPoint.Z}");
+            }
+            return pickedPoint;
+        }
+        public static Point3d GetGripPoint(Entity entity)
+        {
+            Point3dCollection gripPoints__ = new Point3dCollection();
+            IntegerCollection snapModes__ = new IntegerCollection(); // 此参数可省略？
+            IntegerCollection geometryIds__ = new IntegerCollection(); // 此参数可省略？
+            entity.GetGripPoints(gripPoints__, snapModes__, geometryIds__);
+            Point3d p__ = gripPoints__[0];
+            return p__;
+        }
+        public static void WriteMessage(Document doc, string message)
+        {
+            Editor editor = doc.Editor;
+            editor.WriteMessage("\n" + message);
+        }
+        public static Point3d GetFirstPoint_ViaRay<T>(Ray ray, List<T> entities) where T : Entity
+        {
+
+            double shortestDistance = double.MaxValue;
+            Point3d intersectionPoint = Point3d.Origin;
+            foreach (var entity in entities)
+            {
+                // 检测射线与实体的相交关系
+                Point3dCollection intersectionPoints = new Point3dCollection();
+                ray.IntersectWith(entity, Intersect.OnBothOperands, intersectionPoints, IntPtr.Zero, IntPtr.Zero);
+
+                // 如果有交点存在
+                if (intersectionPoints.Count > 0)
+                {
+                    // 计算交点与射线起点的距离
+                    double distance = ray.BasePoint.DistanceTo(intersectionPoints[0]);
+
+                    // 更新最近交点的记录
+                    if (distance < shortestDistance)
+                    {
+                        shortestDistance = distance;
+                        intersectionPoint = intersectionPoints[0];
+                    }
+
+                }
+            }
+            return intersectionPoint;
+        }
+        public static Entity GetEntityViaObjectId(Document doc, ObjectId objectId)
+        {
+            Database database = doc.Database;
+
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                Entity entity = null;
+
+                try
+                {
+                    entity = trans.GetObject(objectId, OpenMode.ForRead) as Entity;
+                }
+                catch (Autodesk.AutoCAD.Runtime.Exception)
+                {
+                    // 处理对象未找到或者其他异常情况
+                }
+
+                trans.Commit();
+
+                return entity;
+            }
+        }
+        public static bool IsInDocument(Document doc, ObjectId[] os)
+        {
+            using (Transaction tr = doc.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId objectId in os)
+                {
+
+                    if (!objectId.IsValid || objectId.IsNull || objectId.IsErased)
+                    {
+                        return false;
+                    }
+                }
+
+                tr.Commit();
+            }
+            return true;
+        }
+        //public static bool IsInDocument(Document doc, ObjectId[] os)
+        //{
+        //    Database database = doc.Database;
+
+        //    using (Transaction trans = database.TransactionManager.StartTransaction())
+        //    {
+        //        BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForRead, false);
+
+        //        foreach (ObjectId o in os)
+        //        {
+        //            if (!blockTable.Has(o))  // 使用Has方法判断ObjectId是否存在于块表中
+        //            {
+        //                return false;  // 如果任何一个ObjectId不存在于文档中，则返回False
+        //            }
+        //        }
+
+        //        trans.Commit();
+        //    }
+
+        //    return true;  // 如果所有的ObjectId都存在于文档中，则返回True
+        //}
+        public static bool IsInDocument(Document doc, ObjectId o)
+        {
+            Database database = doc.Database;
+
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForRead, false);
+
+                if (blockTable.Has(o))  // 使用Has方法判断ObjectId是否存在于块表中
+                {
+                    return true;
+                }
+                else
+                {
+                    trans.Commit();
+                    return false;
+                }
+
+
+            }
+        }
+        public static bool IsInDocument(Document doc, Entity entity)
+        {
+            Database database = doc.Database;
+
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForRead, false);
+                BlockTableRecord blockTableRecord = (BlockTableRecord)trans.GetObject(blockTable[BlockTableRecord.ModelSpace], OpenMode.ForRead, false);
+
+                // 遍历模型空间中的实体
+                foreach (ObjectId objectId in blockTableRecord)
+                {
+                    Entity e = trans.GetObject(objectId, OpenMode.ForRead) as Entity;
+
+                    if (e != null && entity.ObjectId == entity.Id)
+                    {
+                        // 找到了匹配的实体
+                        // 可以执行相关操作或者在控制台输出确认信息
+                        //Console.WriteLine("\n实体仍然存在于文档中。");
+                        return true;
+
+
+                    }
+                }
+
+                trans.Commit();
+            }
+            //Console.WriteLine("\n实体不存在于文档中。");
+
+            return false;
+        }
+        public static void ZoomWin(
+
+          Editor ed, Point3d min, Point3d max
+
+        )
+
+        {
+
+            Point2d min2d = new Point2d(min.X, min.Y);
+
+            Point2d max2d = new Point2d(max.X, max.Y);
+
+
+            ViewTableRecord view =
+
+              new ViewTableRecord();
+
+
+            view.CenterPoint =
+
+              min2d + ((max2d - min2d) / 2.0);
+
+            view.Height = max2d.Y - min2d.Y;
+
+            view.Width = max2d.X - min2d.X;
+
+            ed.SetCurrentView(view);
+
+        }
+        public static void ZoomWin(Editor ed, List<Polyline> polylines)
+        {
+            List<Point3d> point3ds = new List<Point3d>();
+            foreach (Polyline polyline in polylines)
+            {
+                point3ds.AddRange(BasicFunction.PointsOfAPolyLine(polyline));
+            }
+            List<Point2d> point2ds = new List<Point2d>();
+            foreach (Point3d point3d in point3ds)
+            {
+                point2ds.Add(new Point2d(point3d.X, point3d.Y));
+            }
+            Point2d max = point2ds.FirstOrDefault(
+                point => point.X >= point2ds.Select(otherPoint => otherPoint.X).Max());
+            Point2d min = point2ds.FirstOrDefault(
+                point => point.X <= point2ds.Select(otherPoint => otherPoint.X).Min());
+
+            Point2d min2d = new Point2d(min.X, min.Y);
+
+            Point2d max2d = new Point2d(max.X, max.Y);
+
+
+            ViewTableRecord view =
+
+              new ViewTableRecord();
+
+
+            view.CenterPoint =
+
+              min2d + ((max2d - min2d) / 2.0);
+
+            view.Height = max2d.Y - min2d.Y;
+
+            view.Width = max2d.X - min2d.X;
+
+            ed.SetCurrentView(view);
+
+        }
+        public static Point2d Max(Point2d p1, Point2d p2)
+        {
+            if (p1.X > p2.X && p1.Y > p2.Y)
+            {
+                return p1;
+            }
+            else
+            {
+                return p2;
+            }
+        }
+        public static Point2d Min(Point2d p1, Point2d p2)
+        {
+            if (p1.X < p2.X && p1.Y < p2.Y)
+            {
+                return p1;
+            }
+            else
+            {
+                return p2;
+            }
+        }
+
+        public static List<Entity> GetAllEntitiesInClosedPolyline(Document doc, Polyline polyline, SelectionFilter filter)
+        {
+            List<Entity> entities = new List<Entity>();
+            if (polyline != null)
+            {
+                var points = BasicFunction.PointsOfAPolyLine(polyline);
+                Point3d first_Corner = points[0];
+                Point3d opposite_Corner = points[2];
+                BasicFunction.ZoomWin(doc.Editor, first_Corner, opposite_Corner);
+                PromptSelectionResult psr = doc.Editor.SelectWindow(first_Corner, opposite_Corner, filter);
+                //PromptSelectionResult psr = doc.Editor.SelectWindow(first_Corner, opposite_Corner);
+                SelectionSet sSET = psr.Value;
+                ObjectId[] ids = sSET?.GetObjectIds();
+                if (ids == null) return entities;
+                using (Transaction trans = doc.Database.TransactionManager.StartTransaction())
+                {
+                    for (int i = 0; i < ids.Length; i++)
+                    {
+                        Entity ent = (Entity)ids[i].GetObject(OpenMode.ForRead);
+                        entities.Add(ent);
+                    }
+                }
+            }
+            return entities;
+
+        }
+        public static Document GetOpenDocument(string docName)
+        {
+            // 获取当前程序实例
+            DocumentCollection documents = Application.DocumentManager;
+
+            // 遍历所有已经打开的文档
+            foreach (Document doc in documents)
+            {
+                if (doc.Name.Equals(docName, StringComparison.OrdinalIgnoreCase))
+                {
+                    // 如果找到了相同文件名的文档，则返回该文档
+                    return doc;
+                }
+            }
+
+            // 如果没有找到相同文件名的文档，则返回 null
+            return null;
+        }
+        public static bool IsDocumentAlreadyOpen(string docName)
+        {
+            // 获取当前程序实例
+            DocumentCollection documents = Application.DocumentManager;
+
+            // 遍历所有已经打开的文档
+            foreach (Document doc in documents)
+            {
+                if (doc.Name.Equals(docName, StringComparison.OrdinalIgnoreCase))
+                {
+                    // 如果找到了相同文件名的文档，则返回 true 表示已经打开
+                    return true;
+                }
+            }
+
+            // 如果没有找到相同文件名的文档，则返回 false 表示没有打开
+            return false;
+        }
+        public static Entity GetEntityViaClick(Document doc)
+        {
+            Editor editor = doc.Editor;
+            Entity e = null;
+            using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+            {
+                PromptEntityOptions options = new PromptEntityOptions("\n请点选实体：");
+                PromptEntityResult result = editor.GetEntity(options);
+                if (result.Status == PromptStatus.OK)
+                {
+                    DBObject dBObject = tr.GetObject(result.ObjectId, OpenMode.ForWrite);
+                    if (dBObject is Entity entity)
+                    {
+                        if (entity != null)
+                        {
+                            string layerName = entity.Layer;
+                            Color color = entity.Color;
+                            e = entity;
+                        }
+                    }
+                }
+            }
+            return e;
+
+        }
+        public static List<Entity> GetEntitiesViaClick(Document doc, string hints)
+        {
+
+            List<Entity> entities = new List<Entity>();
+
+            while (true)
+            {
+                doc.Editor.WriteMessage(("\n") + hints);
+                Editor editor = doc.Editor;
+                Database db = doc.Database;
+                // 提示用户选择第一个实体
+
+                PromptEntityOptions peo1 = new PromptEntityOptions("\n请选择第一个实体：");
+                //peo1.AllowNone = true;
+                //peo1.SetRejectMessage("请选择有效实体。");
+                //peo1.AddAllowedClass(typeof(Entity), true);
+
+                PromptEntityResult per1 = editor.GetEntity(peo1);
+                if (per1.Status != PromptStatus.OK)
+                    break;
+
+                Entity ent1 = null;
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    ent1 = tr.GetObject(per1.ObjectId, OpenMode.ForRead) as Entity;
+                    tr.Commit();
+                }
+                entities.Add(ent1);
+                // 提示用户选择第二个实体
+                PromptEntityOptions peo2 = new PromptEntityOptions("\n请选择第二个实体：");
+                //peo2.AllowNone = true;
+                //peo2.SetRejectMessage("请选择有效实体。");
+                //peo2.AddAllowedClass(typeof(Entity), true);
+
+                PromptEntityResult per2 = editor.GetEntity(peo2);
+                if (per2.Status != PromptStatus.OK)
+                    break;
+
+                Entity ent2 = null;
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    ent2 = tr.GetObject(per2.ObjectId, OpenMode.ForRead) as Entity;
+                    tr.Commit();
+                }
+                entities.Add(ent2);
+
+            }
+
+
+            return entities;
+        }
+
+        public static List<object> GetObjectsViaClick(Document doc, string hints)
+        {
+
+            List<object> entities = new List<object>();
+
+            while (true)
+            {
+                doc.Editor.WriteMessage(("\n") + hints);
+                Editor editor = doc.Editor;
+                Database db = doc.Database;
+
+
+                // 提示用户选择第一个实体
+                PromptEntityOptions peo1 = new PromptEntityOptions("\n请点选文本：");
+                PromptEntityResult per1 = editor.GetEntity(peo1);
+                if (per1.Status != PromptStatus.OK)
+                    break;
+                Entity ent1 = null;
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    ent1 = tr.GetObject(per1.ObjectId, OpenMode.ForRead) as Entity;
+                    tr.Commit();
+                }
+                entities.Add(ent1);
+
+                // 提示用户选择第二个实体
+                PromptEntityOptions peo2 = new PromptEntityOptions("\n请点选多段线：");
+                PromptEntityResult per2 = editor.GetEntity(peo2);
+                if (per2.Status != PromptStatus.OK)
+                    break;
+                Entity ent2 = null;
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    ent2 = tr.GetObject(per2.ObjectId, OpenMode.ForRead) as Entity;
+                    tr.Commit();
+                }
+                entities.Add(ent2);
+
+                // 提示用户选择点
+                PromptPointOptions peo3 = new PromptPointOptions("\n请点击多段线的起点");
+                PromptPointResult per3 = editor.GetPoint(peo3);
+                if (per3.Status != PromptStatus.OK)
+                    break;
+                Point3d point = new Point3d();
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    point = per3.Value;
+                    tr.Commit();
+                }
+                entities.Add(point);
+
+
+
+            }
+
+
+            return entities;
+        }
+
+        /// <summary>
+        /// 将Point3d转换为实体点DBPoint添加到文档中
+        /// </summary>
+        /// <param name="doc"></param>
+        /// <param name="p"></param>
+        public static DBPoint AddDBPoint(Document doc, Point3d p)
+        {
+            Database db = doc.Database;
+            Editor editor = doc.Editor;
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+                BlockTableRecord btr = tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
+                DBPoint point = new DBPoint(p);
+                point.Color = Color.FromColorIndex(ColorMethod.ByColor, 1);
+                btr.AppendEntity(point);
+                tr.AddNewlyCreatedDBObject(point, true);
+                tr.Commit();
+                return point;
+            }
+
+        }
+        public static DBPoint AddDBPoint(Document doc, Point3d p,short colorIndex)
+        {
+            Database db = doc.Database;
+            Editor editor = doc.Editor;
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+                BlockTableRecord btr = tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
+                DBPoint point = new DBPoint(p);
+                point.Color = Color.FromColorIndex(ColorMethod.ByColor, colorIndex);
+                btr.AppendEntity(point);
+                tr.AddNewlyCreatedDBObject(point, true);
+                tr.Commit();
+                return point;
+            }
+
+        }
+
+        /// <summary>
+        /// 画点列表中的各个点，并用文字标注点的顺序
+        /// </summary>
+        /// <param name="doc"></param>
+        /// <param name="points"></param>
+        public static void DrawPointViaPointList(Document doc, List<Point3d> points, string layerName, string message = "")
+        {
+            Database db = doc.Database;
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                foreach (var item in points)
+                {
+                    Point3d startPoint = item;
+                    DBPoint dBPoint = AddDBPoint(doc, startPoint);
+                    dBPoint.Layer = layerName;
+                    if (message != "")
+                    {
+                        DBText text_ = BasicFunction.CreateDBText($"第{points.IndexOf(item) + 1}个点 距离为：{message}米"
+                                        , startPoint
+                                        , 10
+                                        , 2
+                                        , 0 // Math.PI / 2
+                                        , false
+                                        , 3);
+                        text_.Layer = layerName;
+                        BasicFunction.ToModelSpace(text_, db);
+                    }
+                    else
+                    {
+                        DBText text = BasicFunction.CreateDBText($"第{points.IndexOf(item) + 1}个点"
+                        , startPoint
+                        , 10
+                        , 2
+                        , 0 // Math.PI / 2
+                        , false
+                        , 3);
+                        text.Layer = layerName;
+                        BasicFunction.ToModelSpace(text, db);
+                    }
+                }
+                trans.Commit();
+            }
+
+        }
+
+        public static bool MoveToward(Document doc, Entity entity, Vector3d translation)
+        {
+            Database db = doc.Database;
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                try
+                {
+                    Entity ent = trans.GetObject(entity.Id, OpenMode.ForWrite, false, true) as Entity;
+                    //BasicFunction.UnlockLayer(ent); // 解锁ent所在图层
+                    ent.TransformBy(Matrix3d.Displacement(translation)); // 将实体应用平移变换
+                    trans.Commit(); // 提交事务
+                    return true;
+                }
+                catch (System.Exception ex)
+                {
+                    doc.Editor.WriteMessage("\n移动出现错误：" + ex.Message);
+                    trans.Abort();
+                    return false;
+                }
+            }
+        }
+
+        public static void UnlockLayer(Entity e)
+        {
+
+            ObjectId layerId = e.LayerId;
+
+            using (Transaction tr = e.Database.TransactionManager.StartTransaction())
+            {
+                LayerTableRecord layer = (LayerTableRecord)tr.GetObject(layerId, OpenMode.ForWrite);
+                if (layer.IsLocked)
+                {
+                    layer.IsLocked = false;
+                }
+            }
+
+        }
+        public static List<Point3d> Intersect_2Entities(Document doc, Entity e1, Entity e2)
+        {
+            Point3dCollection p3c = new Point3dCollection();
+            List<Point3d> intersectPoints = new List<Point3d>();
+            e1.IntersectWith(e2, Intersect.OnBothOperands, p3c, IntPtr.Zero, IntPtr.Zero);
+            if (p3c.Count > 0)
+            {
+                foreach (Point3d item in p3c)
+                {
+                    intersectPoints.Add(item);
+                }
+                return intersectPoints;
+            }
+            else
+            {
+                return new List<Point3d>();
+            }
+        }
+        /// <summary>
+        /// 将一个实体添加到database所在的模型空间里
+        /// </summary>
+        /// <param name="entity"></param>
+        /// <param name="database"></param>
+        /// <returns></returns>
+        public static ObjectId ToModelSpace(Entity entity, Database database)
+        {
+            ObjectId objectId;
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForWrite, false);
+                BlockTableRecord blockTableRecord = (BlockTableRecord)trans.GetObject(blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite, false);
+                objectId = blockTableRecord.AppendEntity(entity);
+                trans.AddNewlyCreatedDBObject(entity, true);
+                trans.Commit();
+            }
+            return objectId;
+        }
+        /// <summary>
+        /// 将一个实体添加到database所在的模型空间里
+        /// </summary>
+        /// <param name="entity"></param>
+        /// <param name="database"></param>
+        /// <returns></returns>
+        public static ObjectId ToModelSpace(Document doc, Entity entity)
+        {
+            ObjectId objectId;
+
+            using (doc.LockDocument())
+            {
+                Database database = doc.Database;
+                using (Transaction trans = database.TransactionManager.StartTransaction())
+                {
+                    BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForWrite, false);
+                    BlockTableRecord blockTableRecord = (BlockTableRecord)trans.GetObject(blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite, false);
+                    objectId = blockTableRecord.AppendEntity(entity);
+                    trans.AddNewlyCreatedDBObject(entity, true);
+                    trans.Commit();
+
+                }
+
+            }
+
+            return objectId;
+        }
+
+        /// <summary>
+        /// 判断线段是否在攀升
+        /// </summary>
+        /// <param name="line"></param>
+        /// <returns></returns>
+        public static bool IsLineUp(Line line, Dictionary<Point3d, double> allPointsElevations)
+        {
+            Point3d startPoint = line.StartPoint;
+            Point3d endPoint = line.EndPoint;
+            if (allPointsElevations[endPoint] - allPointsElevations[startPoint] > 0) return true;
+            else return false;
+        }
+        public static bool IsLineHorizontal(Line line)
+        {
+
+            if ((line.EndPoint.Y - line.StartPoint.Y) == 0) return true;
+            else return false;
+
+        }
+        /// <summary>
+        /// 将Point3d列表按照X坐标的值升序
+        /// </summary>
+        /// <param name="p"></param>
+        /// <returns></returns>
+        public static List<Point3d> SortPoints(List<Point3d> p)
+        {
+            List<Point3d> newPoints = new List<Point3d>();
+            newPoints = p.OrderBy(x => x.X).ToList();
+            return newPoints;
+        }
+        /// <summary>
+        /// 根据块名获得块
+        /// </summary>
+        /// <param name="btrName"></param>
+        /// <param name="db"></param>
+        /// <returns></returns>
+        public static BlockTableRecord GetBlock(string btrName, Database db)
+        {
+            BlockTableRecord block = new BlockTableRecord();
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+                block = tr.GetObject(bt[btrName], OpenMode.ForRead) as BlockTableRecord;
+                tr.Commit();
+            }
+            return block;
+        }
+        /// <summary>
+        /// 在指定点插入块
+        /// </summary>
+        /// <param name="db"></param>
+        /// <param name="blockName"></param>
+        /// <param name="point"></param>
+        /// <returns></returns>
+
+        public static ObjectId AddBlockReferenceToCertainPoint(Database db, string blockName, Point3d point)
+        {
+            ObjectId obI;
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+                BlockTableRecord btr = tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
+
+                BlockReference br = new BlockReference(point, GetBlock(blockName, db).Id); // 通过块定义创建块参照
+                obI = btr.AppendEntity(br); //把块参照添加到块表记录
+                tr.AddNewlyCreatedDBObject(br, true); // 通过事务添加块参照到数据库
+                tr.Commit();
+            }
+            return obI;
+        }
+        /// <summary>
+        /// 由插入点、文字内容、文字样式、文字高度创建单行文字
+        /// </summary>
+        /// <param name="textString">文字内容</param>
+        /// <param name="position">基点</param>
+        /// <param name="height">文字高度</param>
+        /// <param name="rot">文字转角</param>
+        /// <param name="isfield">是否是包含域</param>
+        /// <returns></returns>
+        public static DBText CreateDBText(string textString, Point3d position, double height, double widthFactor, double rot, bool isfield, short colorIndex)
+        {
+            DBText txt = new DBText();
+            txt.Position = position;
+            txt.Height = height;
+            txt.Rotation = rot;
+            txt.WidthFactor = widthFactor;
+            txt.Color = Color.FromColorIndex(ColorMethod.ByColor, colorIndex);
+            if (isfield)
+            {
+                Field field = new Field(textString);
+                txt.SetField(field);
+            }
+            else
+                txt.TextString = textString;
+            return txt;
+        }
+
+
+
+        public static Entity SelectEntity(string word)
+        {
+            Document doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+            Entity entity = null;
+            PromptEntityResult ent = ed.GetEntity(word);
+            if (ent.Status == PromptStatus.OK)
+            {
+                using (Transaction transaction = db.TransactionManager.StartTransaction())
+                {
+                    entity = (Entity)transaction.GetObject(ent.ObjectId, OpenMode.ForWrite, true);
+                    transaction.Commit();
+                }
+            }
+            return entity;
+        }
+        /// <summary>
+        /// 指定两个镜像参照点得到实体镜像
+        /// </summary>
+        /// <param name="ent">实体对象</param>
+        /// <param name="mirrorPt1">镜像点1</param>
+        /// <param name="mirrorPt2">镜像点2</param>
+        public static Entity Mirror(Entity ent, Point3d mirrorPt1, Point3d mirrorPt2)
+        {
+            Line3d mirrorLine = new Line3d(mirrorPt1, mirrorPt2);
+            Matrix3d mt = Matrix3d.Mirroring(mirrorLine);
+            ent.TransformBy(mt);
+            return ent;
+        }
+        /// <summary>
+        /// 将块表记录加入到块表中
+        /// </summary>
+        /// <returns></returns>
+        public ObjectId AddBlockTableRecord(BlockTableRecord btr, Database db)
+        {
+            ObjectId id = new ObjectId();
+            using (Transaction transaction = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = transaction.GetObject(db.BlockTableId, OpenMode.ForWrite) as BlockTable;
+                id = bt.Add(btr);
+                transaction.AddNewlyCreatedDBObject(btr, true);
+                transaction.Commit();
+            }
+            return id;
+        }
+
+        /// <summary>
+        /// 根据图层名，图层颜色色号来添加图层
+        /// </summary>
+        /// <param name="layerName"></param>
+        /// <param name="colorIndex"></param>
+        /// <param name="database"></param>
+        /// <returns></returns>
+        public static ObjectId AddLayer(string layerName, short colorIndex, Database database)
+        {
+            ObjectId objectId = ObjectId.Null;
+            short colorIndex1 = (short)(colorIndex % 256);
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                LayerTable layerTable = (LayerTable)trans.GetObject(database.LayerTableId, OpenMode.ForWrite, false);
+                if (layerTable.Has(layerName) == false)
+                {
+                    LayerTableRecord layerTableRecord = new LayerTableRecord();
+                    layerTableRecord.Name = layerName;
+                    layerTableRecord.Color = Color.FromColorIndex(ColorMethod.ByColor, colorIndex1);
+                    objectId = layerTable.Add(layerTableRecord);
+                    trans.AddNewlyCreatedDBObject(layerTableRecord, true);
+
+                }
+                trans.Commit();
+                return objectId;
+            }
+        }
+        /// <summary>
+        /// 将实体对象添加到文档中显示出来
+        /// </summary>
+        /// <param name="entity"></param>
+        /// <returns></returns>
+        public static ObjectId ToModelSpace2(Entity entity)
+        {
+            ObjectId id;
+            Database db = HostApplicationServices.WorkingDatabase;
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)trans.GetObject(db.BlockTableId, OpenMode.ForWrite, false);
+                BlockTableRecord btr = (BlockTableRecord)trans.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite, false);
+                id = btr.AppendEntity(entity);
+                trans.AddNewlyCreatedDBObject(entity, true);//这里第一个参数好像用btr或者entity都可以
+                trans.Commit();
+            }
+            return id;
+        }
+        /// <summary>
+        /// 获得文档中所有的Polyline2d
+        /// </summary>
+        /// <param name="db"></param>
+        /// <param name="doc"></param>
+        /// <returns></returns>
+        public static List<Polyline2d> GetAllPolyline2d2(Database db, Document doc)
+        {
+            List<Polyline2d> polyline2dList = new List<Polyline2d>();
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)trans.GetObject(db.BlockTableId, OpenMode.ForRead, false);
+                foreach (var item in bt)
+                {
+                    BlockTableRecord btr = (BlockTableRecord)trans.GetObject(item, OpenMode.ForRead);
+                    foreach (var r in btr)
+                    {
+                        DBObject dBObject = trans.GetObject(r, OpenMode.ForRead);
+                        if (dBObject.GetType() == typeof(Polyline2d))
+                        {
+                            Polyline2d pl2d = dBObject as Polyline2d;
+                            polyline2dList.Add(pl2d);
+                        }
+                    }
+                }
+                trans.Commit();
+
+            }
+            return polyline2dList;
+        }
+        /// <summary>
+        /// 获得所有的图层名
+        /// </summary>
+        /// <param name="db"></param>
+        /// <param name="doc"></param>
+        /// <returns></returns>
+        public static List<string> GetAllLayer(Database db, Document doc)
+        {
+            List<string> layerList = new List<string>();
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                LayerTable lt = (LayerTable)trans.GetObject(db.LayerTableId, OpenMode.ForRead);
+                foreach (var item in lt)
+                {
+                    LayerTableRecord ltr = trans.GetObject(item, OpenMode.ForRead) as LayerTableRecord;
+                    layerList.Add(ltr.Name);
+
+                }
+
+            }
+            return layerList;
+        }
+        public static List<Line> LinesOfAPolyLine(Polyline pl)
+        {
+            List<Point3d> point3ds = new List<Point3d>();
+            List<Line> lines = new List<Line>();
+            for (int i = 0; i < pl.NumberOfVertices; i++)
+            {
+                point3ds.Add(pl.GetPoint3dAt(i));
+            }
+            for (int i = 0; i < point3ds.Count - 1; i++)
+            {
+                Line line = new Line(point3ds[i], point3ds[i + 1]);
+                lines.Add(line);
+            }
+            return lines;
+        }
+        public static List<Point3d> PointsOfAPolyLine(Polyline pl)
+        {
+            List<Point3d> point3ds = new List<Point3d>();
+            for (int i = 0; i < pl.NumberOfVertices; i++)
+            {
+                point3ds.Add(pl.GetPoint3dAt(i));
+            }
+            return point3ds;
+        }
+
+        public static bool IsLineDown(Line line, Dictionary<Point3d, double> allPointsElevations)
+        {
+            Point3d startPoint = line.StartPoint;
+            Point3d endPoint = line.EndPoint;
+            if (allPointsElevations[endPoint] - allPointsElevations[startPoint] < 0) return true;
+            else return false;
+        }
+
+        /// <summary>
+        /// 创建多行文字
+        /// </summary>
+        /// <param name="textString"></param>
+        /// <param name="location"></param>
+        /// <param name="height"></param>
+        /// <param name="width"></param>
+        /// <param name="rot">文字转角</param>
+        /// <param name="isfield">是否是包涵域</param>
+        /// <returns></returns>
+        public MText CreateMText(string textString, Point3d location, double height, double width, double rot, bool isfield)
+        {
+            MText txt = new MText();
+            txt.Location = location;
+            txt.TextHeight = height;
+            txt.Width = width;
+            txt.Rotation = rot;
+            txt.Color = Color.FromColorIndex(ColorMethod.ByColor, 20);
+            if (isfield)
+            {
+                Field field = new Field(textString);
+                txt.SetField(field);
+            }
+            else
+                txt.Contents = textString;
+            return txt;
+        }
+
+        public static List<T> GetAllT_viaSelection<T>(Document doc, string layerName, short colorIndex) where T : Entity
+        {
+            List<T> selectedLines = new List<T>();
+
+            using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+            {
+                // 设置提示词
+                PromptSelectionOptions opts = new PromptSelectionOptions();
+                opts.MessageForAdding = "\n请框选一行图纸：\n";
+                // 提示用户框选实体
+                PromptSelectionResult result = doc.Editor.GetSelection(opts);
+                if (result.Status != PromptStatus.OK)
+                    return null;
+
+                // 获取选中实体的ObjectId数组
+                ObjectId[] objectIds = result.Value.GetObjectIds();
+
+                // 遍历选中实体
+                foreach (ObjectId objectId in objectIds)
+                {
+                    // 通过ObjectId打开实体
+                    Entity entity = (Entity)objectId.GetObject(OpenMode.ForRead);
+
+                    // 判断实体是否为Line类型
+                    if (entity.GetType() == typeof(T) && entity.Layer == layerName && entity.ColorIndex == colorIndex)
+                    {
+                        T line = (T)entity;
+                        selectedLines.Add(line);
+                    }
+                }
+
+                tr.Commit();
+            }
+            return selectedLines;
+        }
+        public static List<Entity> GetAllEntity_viaSelection(Document doc)
+        {
+            List<Entity> selectedEntities = new List<Entity>();
+            using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+            {
+                PromptSelectionOptions opts = new PromptSelectionOptions();
+                opts.MessageForAdding = "\n请框选一行图纸：\n";
+                PromptSelectionResult result = doc.Editor.GetSelection(opts);
+                if (result.Status != PromptStatus.OK)
+                    return null;
+                ObjectId[] objectIds = result.Value.GetObjectIds();
+                foreach (ObjectId objectId in objectIds)
+                {
+                    Entity entity = (Entity)objectId.GetObject(OpenMode.ForRead);
+                    if (entity != null)
+                    {
+                        selectedEntities.Add(entity);
+                    }
+                }
+
+                tr.Commit();
+            }
+            return selectedEntities;
+        }
+
+        /// <summary>
+        /// 获得指定类型在文档中的所有对象
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="doc"></param>
+        /// <returns></returns>
+        public static List<T> GetAllT<T>(Document doc) where T : DBObject
+        {
+            Database db = doc.Database;
+            List<T> tList = new List<T>();
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)trans.GetObject(db.BlockTableId, OpenMode.ForRead, false);
+                foreach (var item in bt)
+                {
+                    BlockTableRecord btr = (BlockTableRecord)trans.GetObject(item, OpenMode.ForRead);
+                    foreach (var r in btr)
+                    {
+                        DBObject dBObject = trans.GetObject(r, OpenMode.ForRead);
+                        //if (dBObject.GetType() == typeof(T))
+                        if (dBObject is T)
+                        {
+                            T t = dBObject as T;
+                            tList.Add(t);
+                        }
+                    }
+                }
+                trans.Commit();
+
+            }
+            return tList;
+
+        }
+
+        /// <summary>
+        /// 获得指定类型在文档中的所有对象,限制条件包括：图层名
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="doc"></param>
+        /// <returns></returns>
+        public static List<T> GetAllT<T>(Document doc, string layerName) where T : DBObject
+        {
+            Database db = doc.Database;
+            List<T> tList = new List<T>();
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)trans.GetObject(db.BlockTableId, OpenMode.ForRead, false);
+                foreach (var item in bt)
+                {
+                    BlockTableRecord btr = (BlockTableRecord)trans.GetObject(item, OpenMode.ForRead);
+                    foreach (var r in btr)
+                    {
+                        DBObject dBObject = trans.GetObject(r, OpenMode.ForRead);
+                        Entity entity = dBObject as Entity;
+                        if (entity is T && entity.Layer == layerName)
+                        {
+                            T t = dBObject as T;
+                            tList.Add(t);
+                        }
+                    }
+                }
+                trans.Commit();
+
+            }
+            return tList;
+
+        }
+        /// <summary>
+        /// 获得指定类型在文档中的所有对象,限制条件包括：图层名,colorIndex
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="doc"></param>
+        /// <returns></returns>
+        public static List<T> GetAllT<T>(Document doc, string layerName, short colorIndex) where T : DBObject
+        {
+            Database db = doc.Database;
+            List<T> tList = new List<T>();
+            using (Transaction trans = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)trans.GetObject(db.BlockTableId, OpenMode.ForRead, false);
+                foreach (var item in bt)
+                {
+                    BlockTableRecord btr = (BlockTableRecord)trans.GetObject(item, OpenMode.ForRead);
+                    foreach (var r in btr)
+                    {
+                        DBObject dBObject = trans.GetObject(r, OpenMode.ForRead);
+                        Entity entity = dBObject as Entity;
+                        if (entity is T && entity.Layer == layerName && entity.ColorIndex == colorIndex)
+                        {
+                            T t = dBObject as T;
+                            tList.Add(t);
+                        }
+                    }
+                }
+                trans.Commit();
+
+            }
+            return tList;
+
+        }
+
+
+        /// <summary>
+        /// 判断两个DBText数组中的元素是否完全相同
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="a1"></param>
+        /// <param name="a2"></param>
+        /// <returns></returns>
+        public static bool AreDBTextArraysEqual(DBText[] a1, DBText[] a2)
+        {
+            if (ReferenceEquals(a1, a2))
+                return true;
+
+            if (a1 == null || a2 == null)
+                return false;
+
+            if (a1.Length != a2.Length)
+                return false;
+            bool iFlag = false;
+            for (int i = 0; i < a1.Length; i++)
+            {
+                bool jFlag = false;
+                for (int j = 0; j < a2.Length; j++)
+                {
+                    if (a1[i].TextString == a2[j].TextString)
+                    {
+                        jFlag = true;
+                        break;
+                    }
+                }
+                if (jFlag)
+                {
+                    iFlag = true;
+                }
+                else
+                {
+                    iFlag = false;
+                }
+            }
+            if (iFlag)
+            {
+                return true;
+
+            }
+            else
+            {
+                return false;
+            }
+
+
+        }
+        public static List<Entity> GetOtherEntitiesAroundThisEntity(Entity entity)
+        {
+            throw new NotImplementedException();
+        }
+        /// <summary>
+        /// 获得鼠标指针从右向左框选的所有实体，并且这些实体属于TypedValue[]所构成的过滤器中的类别
+        /// </summary>
+        /// <param name="doc"></param>
+        /// <param name="typeValues"></param>
+        /// <returns></returns>
+        public static List<Entity> GetEntitiesViaFrameSelectionPlusTypedValue(Document doc, TypedValue[] typeValues)
+        {
+            // 获取当前文档和编辑器
+            Editor ed = doc.Editor;
+
+            // 定义用于选择的过滤器
+            //TypedValue[] filterList = new TypedValue[1] { new TypedValue((int)DxfCode.Operator, "<OR") };
+            ////filterList = AddFilterToList(filterList, new[] { "LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC", "SPLINE" });
+            //filterList = AddFilterToList(filterList, new[] { "LWPOLYLINE", "POLYLINE" });
+            //filterList = AddFilterToList(filterList, new TypedValue((int)DxfCode.Operator, "OR>"));
+            // 提示用户框选实体
+            SelectionFilter filter = new SelectionFilter(typeValues);
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "请从右向左框选";
+            pso.MessageForRemoval = "选错了";
+            PromptSelectionResult psr = ed.GetSelection(pso, filter);
+
+            List<Entity> wantedEntities = new List<Entity>(); // 储存想要的entity
+
+            if (psr.Status == PromptStatus.OK)
+            {
+                SelectionSet selectionSet = psr.Value;
+                Transaction tr = doc.TransactionManager.StartTransaction();
+
+                try
+                {
+                    // 遍历选择集中的实体
+                    foreach (ObjectId id in selectionSet.GetObjectIds())
+                    {
+                        // 获取实体对象
+                        Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                        // 检查实体是否符合过滤器条件
+                        if (ent != null)
+                        {
+                            // 处理实体对象
+                            wantedEntities.Add(ent);
+                            //ed.WriteMessage("\nSelected entity: {0}+{1}", ent.GetType().Name, ent.GetType().FullName);
+                        }
+                    }
+                }
+                finally
+                {
+                    tr.Dispose();
+                }
+            }
+            return wantedEntities;
+        }
+        public static TypedValue[] AddFilterToList(TypedValue[] filterList, string[] filterTypes)
+        {
+            foreach (string type in filterTypes)
+            {
+                filterList = AddFilterToList(filterList, new TypedValue((int)DxfCode.Start, type));
+            }
+            return filterList;
+        }
+
+        public static TypedValue[] AddFilterToList(TypedValue[] filterList, TypedValue value)
+        {
+            Array.Resize(ref filterList, filterList.Length + 1);
+            filterList[filterList.Length - 1] = value;
+            return filterList;
+        }
+
+        /// <summary>
+        /// 获得实体entity的图层名
+        /// </summary>
+        /// <param name="entity"></param>
+        /// <returns></returns>
+        public static string GetLayerName(Entity entity)
+        {
+            // 获取多段线所在的图层ID
+            ObjectId layerId = entity.LayerId;
+
+            // 获取图层名
+            string layerName = "";
+            using (Transaction tr = entity.Database.TransactionManager.StartTransaction())
+            {
+                LayerTableRecord layer = (LayerTableRecord)tr.GetObject(layerId, OpenMode.ForRead);
+                layerName = layer.Name;
+            }
+
+            return layerName;
+        }
+        /// <summary>
+        /// 判断两个实体entity是否相交, e1.IntersectWith(e2, Intersect.ExtendBoth, p3c, IntPtr.Zero, IntPtr.Zero)
+        /// </summary>
+        /// <param name="e1">e1.IntersectWith(e2, Intersect.ExtendBoth, p3c, IntPtr.Zero, IntPtr.Zero);</param>
+        /// <param name="e2">e1.IntersectWith(e2, Intersect.ExtendBoth, p3c, IntPtr.Zero, IntPtr.Zero);</param>
+        /// <returns></returns>
+        public static bool IsIntersected(Entity e1, Entity e2, Intersect intersect)
+        {
+            Point3dCollection p3c = new Point3dCollection();
+            e1.IntersectWith(e2, intersect, p3c, IntPtr.Zero, IntPtr.Zero);
+            if (p3c.Count > 0)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        public static bool IsBoundingBoxIntersected(Entity e1, Entity e2, Intersect intersect)
+        {
+            Point3dCollection p3c = new Point3dCollection();
+            e1.BoundingBoxIntersectWith(e2, intersect, p3c, IntPtr.Zero, IntPtr.Zero);
+            if (p3c.Count > 0)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        public static List<Point3d> GetIntersectedPoints(Entity e1, Entity e2, Intersect intersect)
+        {
+            List<Point3d> temp = new List<Point3d>();
+            Point3dCollection p3c = new Point3dCollection();
+            e1.IntersectWith(e2, intersect, p3c, IntPtr.Zero, IntPtr.Zero);
+            if (p3c.Count > 0)
+            {
+                foreach (Point3d p in p3c)
+                {
+                    temp.Add(p);
+                }
+                return temp;
+            }
+            else
+            {
+                return temp;
+            }
+
+        }
+
+
+        /// <summary>
+        /// 判断两个实体entity的BoundingBox是否相交,e1.BoundingBoxIntersectWith(e2, intersect, p3c, IntPtr.Zero, IntPtr.Zero)
+        /// </summary>
+        /// <param name="e1"></param>
+        /// <param name="e2"></param>
+        /// <param name="intersect"></param>
+        /// <returns></returns>
+        public static bool IsIntersectedViaBoundingBox(Entity e1, Entity e2, Intersect intersect)
+        {
+            Point3dCollection p3c = new Point3dCollection();
+            e1.BoundingBoxIntersectWith(e2, intersect, p3c, IntPtr.Zero, IntPtr.Zero);
+            if (p3c.Count > 0)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 判断某个实体entity是否属于某个TypedValue或TypedValue[],但是似乎不起作用
+        /// </summary>
+        /// <param name="ent"></param>
+        /// <param name="typeValues"></param>
+        /// <returns></returns>
+        public static bool IsEntityOfType(Entity ent, params TypedValue[] typeValues)
+        {
+            // 获取实体的ObjectID
+            ObjectId id = ent.ObjectId;
+
+            // 打开实体的事务处理
+            using (Transaction tr = id.Database.TransactionManager.StartTransaction())
+            {
+                // 打开实体的DBObject
+                DBObject obj = tr.GetObject(id, OpenMode.ForRead);
+
+                // 判断实体的DBObject是否是指定的类型
+                foreach (TypedValue tv in typeValues)
+                {
+                    if (obj.GetType().Equals(tv.TypeCode) && obj.GetRXClass().Name.Equals(tv.Value.ToString()))
+                    {
+                        return true;
+                    }
+                }
+
+                // 关闭事务处理
+                tr.Dispose();
+            }
+
+            // 如果实体不属于指定类型，返回false
+            return false;
+        }
+
+        /// <summary>
+        /// 获取点列表里那些Y属性值最小的点，可能不止一个
+        /// </summary>
+        /// <param name="points"></param>
+        /// <returns></returns>
+        public static List<Point3d> GetPointsViaMinY(List<Point3d> points)
+        {
+            List<Point3d> ps = new List<Point3d>();
+            ps = points.OrderBy(x => x.Y).ToList();
+            List<Point3d> result = new List<Point3d>();
+            result.Add(ps[0]);
+            for (int i = 0; i < ps.Count; i++)
+            {
+                if (i == ps.Count - 1)
+                {
+                    if (ps[i].Y == ps[i - 1].Y)
+                    {
+                        result.Add(ps[i]);
+                    }
+                }
+                else
+                {
+                    if (ps[i].Y == ps[i + 1].Y)
+                    {
+                        result.Add(ps[i + 1]);
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+            return result;
+        }
+        /// <summary>
+        /// 获得点列表中，点的X属性值最大和最小的点
+        /// </summary>
+        /// <param name="points"></param>
+        /// <returns></returns>
+        public static List<Point3d> GetPointsViaMinYAndMaxY(List<Point3d> points)
+        {
+            List<Point3d> result = new List<Point3d>();
+            result.Add(points.OrderBy(x => x.X).First());
+            result.Add(points.OrderByDescending(x => x.X).First());
+            return result;
+
+        }
+        /// <summary>
+        /// 获得两个点的中点
+        /// </summary>
+        /// <param name="p1"></param>
+        /// <param name="p2"></param>
+        /// <returns></returns>
+        public static Point3d GetMidpointOfTwoPoints(Point3d p1, Point3d p2)
+        {
+            double x = (p1.X + p2.X) / 2;
+            double y = (p1.Y + p2.Y) / 2;
+            double z = (p1.Z + p2.Z) / 2;
+            Point3d p = new Point3d(x, y, z);
+            return p;
+
+        }
+
+
+    }
+
+}
