@@ -28,7 +28,7 @@ using Window = OpenCvSharp.Window;
 
 namespace OpenCVSharp_Test
 {
-    public class ObtainContourByBoxSelectingEntities
+    public class ObtainOuterContourByBoxSelectingEntities
     {
 
         [CommandMethod("wailun")]
