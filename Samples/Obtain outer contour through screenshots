@@ -25,7 +25,7 @@ using Autodesk.AutoCAD.Internal;
 
 namespace OpenCVSharp_Test
 {
-    public class ObtainContourThroughScreenshots
+    public class ObtainOuterContourThroughScreenshots
     {
         [DllImport("user32.dll")]
         static extern bool GetCursorPos(out POINT lpPoint);
