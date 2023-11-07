@@ -1,0 +1,560 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Runtime;
+using OpenCvSharp;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Controls;
+using System.Windows.Input;
+using Ge = Autodesk.AutoCAD.Geometry ;
+using System.Windows.Forms;
+using Application = Autodesk.AutoCAD.ApplicationServices.Application;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using Autodesk.AutoCAD.Windows;
+using Practicing;
+using System.IO;
+using Autodesk.AutoCAD.Colors;
+using Autodesk.AutoCAD.Internal;
+
+namespace OpenCVSharp_Test
+{
+    public class ObtainContourThroughScreenshots
+    {
+        [DllImport("user32.dll")]
+        static extern bool GetCursorPos(out POINT lpPoint);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [CommandMethod("hand")]
+        public void Run()
+        {
+            try
+            {
+                
+                Document doc = Application.DocumentManager.MdiActiveDocument;
+                Editor editor = doc.Editor;
+                Database db = HostApplicationServices.WorkingDatabase;
+                Random random = new Random();
+                
+#if false
+                try
+                {
+                    //Curve curve = BasicFunction.GetEntityViaClick(doc) as Curve;
+                    //var ext = curve.GeometricExtents;
+                    Ge.Point3d maxP = new Ge.Point3d();
+                    Ge.Point3d minP = new Ge.Point3d();
+
+                    string prompt1 = "\n请点击左下角的点";
+                    PromptPointResult result1 = editor.GetPoint(prompt1);
+                    if (result1.Status == PromptStatus.OK)
+                    {
+                        minP = result1.Value;
+                    }
+                    else
+                    {
+                        throw new System.Exception("未能获取有效的点。");
+                    }
+
+                    string prompt00 = "\n请点击右上角的点";
+                    PromptPointResult result00 = editor.GetPoint(prompt00);
+                    if (result00.Status == PromptStatus.OK)
+                    {
+                        maxP = result00.Value;
+                    }
+                    else
+                    {
+                        throw new System.Exception("未能获取有效的点。");
+                    }
+
+                    var width = (int)(maxP.X - minP.X);
+                    var height = (int)(maxP.Y - minP.Y);
+                    int jiange = 10;
+                    var points = new List<Ge.Point3d>();
+                    var points_db = new List<DBPoint>();
+                    var accuracy = 10;
+                    Dictionary<Ge.Point3d, DBPoint> position_DBPoint = new Dictionary<Ge.Point3d, DBPoint>();
+
+                    // 四叉树主树
+                    QuadTreeNode<Entity> QTN = new QuadTreeNode<Entity>(
+                        (int)(minP.X),
+                        (int)(minP.Y),
+                        width,
+                        height,
+                        5,
+                        1
+                        );
+                    // 将curve添加进树
+                    //List<Entity> entities = BasicFunction.GetAllT<Entity>(doc);
+                    List<Curve> curves = BasicFunction.GetAllT<Curve>(doc);
+                    foreach (var entity in curves)
+                    {
+                        BasicFunction.WriteMessage(doc, "get a curve");
+                        
+                        QTN.AddNode(entity.GeometricExtents.MinPoint, entity);
+
+                    }
+                    BasicFunction.WriteMessage(doc, $"发现了{curves.Count}个曲线");
+
+                    //BasicFunction.WriteMessage(doc, $"添加了{curves.Count}个曲线");
+                    // 将DBPoint添加进树
+                    for (int i = 0; i < width + jiange; i += jiange)
+                    {
+                        for (int j = 0; j < height + jiange; j += jiange)
+                        {
+                            var p3d = new Ge.Point3d((int)(minP.X + i), (int)(minP.Y + j), 0);
+                            points.Add(p3d);
+                            DBPoint dbp = new DBPoint(p3d);
+                            dbp.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(ColorMethod.ByColor, 1);
+                            BasicFunction.ToModelSpace(dbp, db);
+
+                            Circle c = new Circle(p3d, Ge.Vector3d.ZAxis, jiange / 2);
+                            c.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(ColorMethod.ByColor, 1);
+                            BasicFunction.ToModelSpace(c, db);
+
+                            position_DBPoint.Add(p3d, dbp);
+                            QTN.AddNode(p3d, dbp);
+                        }
+                    }
+
+                    DBPoint selectedDBPoint = BasicFunction.GetEntityViaClick(doc) as DBPoint;
+                    // 先获得第一个轮廓点
+                    for (int i = (int)(selectedDBPoint.Position.X) + jiange; i < (int)maxP.X + jiange; i += jiange)
+                    {
+                        
+                        var p = new Ge.Point3d(i, (int)selectedDBPoint.Position.Y, 0);
+                        var dbp = position_DBPoint[p];
+                        var x = minP.X;
+                        var y = minP.Y;
+                        var rect_p=new Rect(x,y,width,height);
+                        List<Entity> entitiesOnTree = new List<Entity>();
+                        List<Curve> curvesOnTree = new List<Curve>();
+                        QTN.GetNode(rect_p,ref entitiesOnTree);
+                        bool flag=false;
+                        foreach (var e in entitiesOnTree)
+                        {
+                            if (e is Curve curve)
+                            {
+                                //BasicFunction.WriteMessage(doc, "I found a curve");
+                                curvesOnTree.Add((Curve)curve);
+                                var pOnCurve = curve.GetClosestPointTo(p, false);
+                                var distance = pOnCurve.DistanceTo(p);
+                                if (pOnCurve.DistanceTo(p) < accuracy)
+                                {
+                                    DBPoint dbp_ = new DBPoint(p);
+                                    dbp_.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(ColorMethod.ByColor, 3);
+                                    BasicFunction.ToModelSpace(dbp_, db);
+                                    var p3d = dbp_.Position;
+                                    Circle c = new Circle(p3d, Ge.Vector3d.ZAxis, jiange / 2);
+                                    c.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(ColorMethod.ByColor, 3);
+                                    BasicFunction.ToModelSpace(c, db);
+                                    editor.WriteMessage("\nGet");
+                                    flag = true;
+                                    break;
+
+
+                                }
+
+                            }
+                        }
+                        if (flag) break;
+                        
+
+                    }
+
+
+                }
+                catch (System.Exception)
+                {
+
+
+                }
+
+                return;
+#endif
+
+#if false
+                LayoutManager layoutMgr = LayoutManager.Current;
+                string currentLayoutName = layoutMgr.CurrentLayout;
+                ObjectId layoutId = layoutMgr.GetLayoutId(currentLayoutName);
+                using (Transaction trans = db.TransactionManager.StartTransaction())
+                {
+
+                    if (!layoutId.IsNull)
+                    {
+                        Layout layout = trans.GetObject(layoutId, OpenMode.ForRead) as Layout;
+                        if (layout != null)
+                        {
+                            BasicFunction.WriteMessage(doc, $"layout为：{layout.LayoutName}");
+                            double layoutWidth = layout.Extents.MaxPoint.X - layout.Extents.MinPoint.X;
+                            double layoutHeight = layout.Extents.MaxPoint.Y - layout.Extents.MinPoint.Y;
+                            BasicFunction.WriteMessage(doc, $"宽为：{layoutWidth}高为：{layoutHeight}");
+
+                        }
+                    }
+                    trans.Commit();
+                }
+
+                return;
+#endif
+
+
+#if false
+                
+                Ge.Point3d[] points_cad = new Ge.Point3d[2]; // 存储cad的两个3d坐标
+                System.Drawing.Point former = doc.Window.GetLocation(); // 好像是视口窗的左上角位置像素坐标
+                System.Windows.Point cad_win_left_top = new System.Windows.Point(former.X, former.Y); // 统一转换成system.Windows.Point坐标，他们x，y的值都一样的
+                var width = doc.Window.GetSize().Width; // 窗的宽、高
+                var height = doc.Window.GetSize().Height;
+                BasicFunction.WriteMessage(doc, $"视口左上角的像素坐标：{cad_win_left_top.ToString()}");
+                BasicFunction.WriteMessage(doc, $"视口宽：{width.ToString()}和高：{height.ToString()}");
+
+                System.Drawing.Point p0 = new System.Drawing.Point(); 
+                System.Drawing.Point p1 =new System.Drawing.Point();
+                System.Drawing.Point p2= new System.Drawing.Point(); 
+
+                double x_offset1 = 0;
+                double y_offset1 = 0;
+                string prompt0 = "\n请点击左上角的点";
+                PromptPointResult result0 = editor.GetPoint(prompt0);
+                if (result0.Status == PromptStatus.OK)
+                {
+                    POINT point_cursor;
+                    GetCursorPos(out point_cursor);
+                    p0 = new System.Drawing.Point(point_cursor.X, point_cursor.Y);
+                    var p_cad = result0.Value;
+                    var p_view = editor.PointToScreen(p_cad, 0);
+                    x_offset1=p0.X - p_view.X;
+                    y_offset1=p0.Y - p_view.Y;
+
+
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+                string prompt1 = "\n请点击左上角的点";
+                PromptPointResult result1 = editor.GetPoint(prompt1);
+                if (result1.Status == PromptStatus.OK)
+                {
+                    POINT point_cursor;
+                    GetCursorPos(out point_cursor);
+                    points_cad[0] = result1.Value;
+                    var p_screen = editor.PointToScreen(points_cad[0], 0);
+                    p1 = new System.Drawing.Point((int)(p_screen.X+x_offset1), (int)(p_screen.Y+y_offset1));
+                    BasicFunction.WriteMessage(doc, $"看这里！win:{point_cursor.X.ToString() + "  " + point_cursor.Y.ToString()} cad_win:{p1.ToString()}");
+
+
+
+
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+                double x_offset2 = 0;
+                double y_offset2 = 0;
+                string prompt00 = "\n请点击右下角的点";
+                PromptPointResult result00 = editor.GetPoint(prompt00);
+                if (result00.Status == PromptStatus.OK)
+                {
+                    POINT point_cursor;
+                    GetCursorPos(out point_cursor);
+                    p0 = new System.Drawing.Point(point_cursor.X, point_cursor.Y);
+                    var p_cad = result00.Value;
+                    var p_view = editor.PointToScreen(p_cad, 0);
+                    x_offset2 = p0.X - p_view.X;
+                    y_offset2 = p0.Y - p_view.Y;
+
+
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+
+                string prompt2 = "\n请点击右下角的点";
+                PromptPointResult result2 = editor.GetPoint(prompt2);
+                if (result2.Status == PromptStatus.OK)
+                {
+                    POINT point_cursor;
+                    GetCursorPos(out point_cursor);
+                    points_cad[1] = result2.Value;
+                    var p_screen = editor.PointToScreen(points_cad[1], 0);
+                    p2 = new System.Drawing.Point((int)(p_screen.X + x_offset2), (int)(p_screen.Y + y_offset2));
+                    BasicFunction.WriteMessage(doc, $"看这里！win:{point_cursor.X.ToString()+"  "+ point_cursor.Y.ToString()} cad_win:{p2.ToString()}");
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+                BasicFunction.WriteMessage(doc, "cad的左上、右下：" + points_cad[0].ToString()+" and "+ points_cad[1].ToString());
+                BasicFunction.WriteMessage(doc, "像素的左上、右下：" + p1.ToString()+" and "+ p2.ToString());
+
+                Bitmap croppedImage = new Bitmap((int)(p2.X - p1.X), (int)(p2.Y - p1.Y));
+                using (Graphics graphics = Graphics.FromImage(croppedImage))
+                {
+                    System.Drawing.Point destination = new System.Drawing.Point(0, 0);
+                    graphics.CopyFromScreen(new System.Drawing.Point((int)(p1.X), (int)(p1.Y)), destination, croppedImage.Size);
+                }
+
+                string savePath = @"E:\CSharp\CADDevelopment\CadRedeveloping\FirstTestOfCadRedevelop\OpenCVSharp_Test\";
+                string fileName = "screenshot.jpg";
+                string fullPath = savePath + fileName;
+                croppedImage.Save(fullPath, System.Drawing.Imaging.ImageFormat.Icon);
+                croppedImage.Dispose();
+                BasicFunction.WriteMessage(doc, "保存成功");
+                                //计算比例尺
+                var scale = (p2.X - p1.X) / (points_cad[1].X - points_cad[0].X);
+                // 读取图像
+                string filePath = @"E:\CSharp\CADDevelopment\CadRedeveloping\FirstTestOfCadRedevelop\OpenCVSharp_Test\screenshot.jpg";
+                Mat image = Cv2.ImRead(filePath);
+                if (image.Empty())
+                {
+                    throw new System.Exception("未能正确加载图像");
+                }
+
+                // 将图像转换为灰度图像
+                Mat grayImage = new Mat();
+                Cv2.CvtColor(image, grayImage, ColorConversionCodes.BGR2GRAY);
+
+                // 对图像进行二值化处理
+                Mat binaryImage = new Mat();
+                Cv2.AdaptiveThreshold(grayImage, binaryImage, 255,AdaptiveThresholdTypes.MeanC, ThresholdTypes.BinaryInv,11,4);
+                
+                // 查找图像中的轮廓
+                OpenCvSharp.Point[][] contours;
+                HierarchyIndex[] hierarchy;
+                
+                Cv2.FindContours(binaryImage, out contours, out hierarchy, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+                BasicFunction.WriteMessage(doc,$"轮廓的数量为：{contours.Length}");   
+
+                //// 遍历每个轮廓并绘制
+                //for (int i = 0; i < contours.Length; i++)
+                //{
+                //    Cv2.DrawContours(image, contours, i, Scalar.Red, thickness: -1);
+                //}
+                //// 创建新的同样大小的图片，背景为白色
+                //Mat result = new Mat(image.Size(), MatType.CV_8UC3, Scalar.White);
+
+                //// 画红色轮廓
+                //for (int i = 0; i < contours.Length; i++)
+                //{
+                //    Cv2.DrawContours(result, contours, i, Scalar.Red, thickness: 2);
+                //}
+                // 显示结果图像
+                //Cv2.ImShow("Result", result);
+                //var isSave = Cv2.ImWrite(@"E:\CSharp\CADDevelopment\CadRedeveloping\FirstTestOfCadRedevelop\FirstTestOfCadRedevelop\pic\output.jpg", image);
+                //Cv2.WaitKey(0);
+
+                // 将图片的像素点转换为cad的point3d点
+                List<List<Ge.Point3d>> contours_cad = new List<List<Ge.Point3d>>();
+                foreach (var contour in contours)
+                {
+                    List<Ge.Point3d> contour_cad = new List<Ge.Point3d>();
+                    foreach (var point in contour)
+                    {
+                        Ge.Point3d point3d= new Ge.Point3d(
+                            point.X/scale,
+                            point.Y/scale,
+                            0
+                            );
+                        contour_cad.Add(point3d);
+                    }
+                    contours_cad.Add(contour_cad);
+
+                }
+                // 在cad中画多段线
+                List<Polyline> polylines = new List<Polyline>();
+                foreach (var contour_cad in contours_cad)
+                {
+                    Polyline polyline = new Polyline();
+                    for (int i = 0; i < contour_cad.Count; i++)
+                    {
+                        polyline.AddVertexAt(i, new Ge.Point2d(contour_cad[i].X, contour_cad[i].Y), 0, 0, 0);
+                    }
+                    polyline.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByColor, 1);
+                    polyline.Closed = true;
+                    polylines.Add(polyline);
+                    BasicFunction.ToModelSpace(doc, polyline);
+                    //break;
+                }
+
+
+#endif
+#if true
+                /*
+                 *  editor.GetCorner版
+                 */
+
+                
+                // 1、初始变量设置
+                Autodesk.AutoCAD.Geometry.Point3d[] points_cad = new Autodesk.AutoCAD.Geometry.Point3d[2]; // 存储cad的两个左上角、右下角点3d坐标
+                System.Drawing.Point p1 =new System.Drawing.Point(); // 存储像素坐标
+                System.Drawing.Point p2= new System.Drawing.Point();
+                double x_offset1 = 0;
+                double y_offset1 = 0;
+
+                // 2、获得校准点
+                string prompt0 = "\n请点击校准点";
+                PromptPointResult result0 = editor.GetPoint(prompt0);
+                if (result0.Status == PromptStatus.OK)
+                {
+                    var p_cad = result0.Value;
+                    POINT point_cursor;
+                    GetCursorPos(out point_cursor);
+                    var p_view = editor.PointToScreen(p_cad, 0);
+                    x_offset1= ( point_cursor.X - p_view.X);
+                    y_offset1= ( point_cursor.Y - p_view.Y);
+                    /*
+                     以上，必须保持电脑系统的缩放与布局为100%
+                     */
+
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+                // 3、获得想要截图的区域
+                string prompt1 = "\n请点击左上角的点";
+                PromptPointResult result1 = editor.GetPoint(prompt1);
+                if (result1.Status == PromptStatus.OK)
+                {
+                    points_cad[0] = result1.Value;
+                    var p_screen = editor.PointToScreen(points_cad[0], 0);
+                    p1 = new System.Drawing.Point((int)(p_screen.X+x_offset1), (int)(p_screen.Y+y_offset1));
+
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+                
+                string prompt2 = "\n请点击右下角的点";
+                PromptCornerOptions pco = new PromptCornerOptions(prompt2, points_cad[0]);
+                PromptPointResult result2=editor.GetCorner(pco);
+                if (result2.Status == PromptStatus.OK)
+                {
+                    points_cad[1] = result2.Value;
+                    var p_screen = editor.PointToScreen(points_cad[1], 0);
+                    p2 = new System.Drawing.Point((int)(p_screen.X + x_offset1), (int)(p_screen.Y + y_offset1));
+                }
+                else
+                {
+                    throw new System.Exception("未能获取有效的点。");
+                }
+
+                // 4、截图并且保存
+                Bitmap croppedImage = new Bitmap((int)(p2.X - p1.X), (int)(p2.Y - p1.Y));
+                using (Graphics graphics = Graphics.FromImage(croppedImage))
+                {
+                    System.Drawing.Point destination = new System.Drawing.Point(0, 0);
+                    graphics.CopyFromScreen(new System.Drawing.Point((int)(p1.X), (int)(p1.Y)), destination, croppedImage.Size);
+                }
+                
+                string savePath = @"E:\CSharp\CADDevelopment\CadRedeveloping\FirstTestOfCadRedevelop\OpenCVSharp_Test\";
+                string fileName = "screenshot.jpg";
+                string fullPath = savePath + fileName;
+                croppedImage.Save(fullPath, System.Drawing.Imaging.ImageFormat.Icon);
+                croppedImage.Dispose();
+
+                // 5、计算比例尺
+                var scale_x = (p2.X - p1.X) / (points_cad[1].X - points_cad[0].X);
+                var scale_y = (p2.Y - p1.Y) / (points_cad[1].Y - points_cad[0].Y);
+
+                // 6、读取图像、处理图像，并且得到轮廓点。
+                string filePath = @"E:\CSharp\CADDevelopment\CadRedeveloping\FirstTestOfCadRedevelop\OpenCVSharp_Test\screenshot.jpg";
+                Mat image = Cv2.ImRead(filePath);
+                if (image.Empty())
+                {
+                    throw new System.Exception("未能正确加载图像");
+                }
+
+                // 将图像转换为灰度图像
+                Mat grayImage = new Mat();
+                Cv2.CvtColor(image, grayImage, ColorConversionCodes.BGR2GRAY);
+
+
+                // 对图像进行二值化处理
+                Mat binaryImage = new Mat();
+                Cv2.AdaptiveThreshold(grayImage, binaryImage, 255,AdaptiveThresholdTypes.MeanC, ThresholdTypes.BinaryInv,11,4);
+
+                // 侵蚀处理
+                Mat imgEroded = new Mat();
+                Mat element = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
+                Cv2.Erode(binaryImage, imgEroded, element, null, 1);
+
+                // 查找图像中的轮廓
+                OpenCvSharp.Point[][] contours;
+                HierarchyIndex[] hierarchy;
+
+                Cv2.FindContours(binaryImage, out contours, out hierarchy, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+                //Cv2.FindContours(binaryImage, out contours, out hierarchy, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+
+
+                // 将图片的像素轮廓转换为cad的point3d点
+                List<List<Ge.Point3d>> contours_cad = new List<List<Ge.Point3d>>();
+                foreach (var contour in contours)
+                {
+                    List<Ge.Point3d> contour_cad = new List<Ge.Point3d>();
+
+                    foreach (var point in contour)
+                    {
+
+                        Ge.Point3d point3d= new Ge.Point3d(
+                            points_cad[0].X +point.X/scale_x,
+                            points_cad[0].Y+point.Y/ scale_y,
+                            0
+                            );
+                        contour_cad.Add(point3d);
+                    }
+                    contours_cad.Add(contour_cad);
+
+                }
+                // 7、在cad中画出轮廓线
+                List<Polyline> polylines = new List<Polyline>();
+                foreach (var contour_cad in contours_cad)
+                {
+                    Polyline polyline = new Polyline();
+                    for (int i = 0; i < contour_cad.Count; i++)
+                    {
+                        polyline.AddVertexAt(i, new Ge.Point2d(contour_cad[i].X, contour_cad[i].Y), 0, 0, 0);
+                    }
+                    polyline.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByColor, 1);
+                    polyline.Closed = true;
+                    polylines.Add(polyline);
+                    BasicFunction.ToModelSpace(doc, polyline);
+                }
+
+
+#endif
+
+
+
+            }
+            catch (System.Exception ex)
+            {
+                string msg = "报错为：" + ex.Message + "\n" + "位置为：" + ex.StackTrace;
+            }
+
+        }
+
+    }
+
+
+}
