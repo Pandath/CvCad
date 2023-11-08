@@ -1,0 +1,233 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Runtime;
+using Ge = Autodesk.AutoCAD.Geometry;
+using OpenCvSharp;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Forms;
+using Application = Autodesk.AutoCAD.ApplicationServices.Application;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using Autodesk.AutoCAD.Windows;
+using System.IO;
+using Autodesk.AutoCAD.Colors;
+using Autodesk.AutoCAD.Internal;
+using Color = Autodesk.AutoCAD.Colors.Color;
+using Autodesk.AutoCAD.Geometry;
+using Window = OpenCvSharp.Window;
+
+
+namespace OpenCVSharp_Test
+{
+    public class 识别房间轮廓
+    {
+        [CommandMethod("fangjian")]
+        public void Run()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor editor = doc.Editor;
+            Database db = HostApplicationServices.WorkingDatabase;
+
+
+            try
+            {
+
+                using (doc.LockDocument())
+                {
+                    var ents = GetEntitiesInSelection(doc);
+
+                    List<Extents3d> extensions = ents.Select(x => x.GeometricExtents).ToList();
+                    List<Ge.Point3d> points = new List<Ge.Point3d>();
+                    foreach (Extents3d item in extensions)
+                    {
+                        Ge.Point3d p1 = item.MinPoint;
+                        Ge.Point3d p2 = item.MaxPoint;
+                        points.Add(p1);
+                        points.Add(p2);
+                    }
+                    List<double> p_x = points.Select(x => x.X).ToList();
+                    List<double> p_y = points.Select(y => y.Y).ToList();
+                    var xMin = (int)(p_x.OrderBy(x => x).First());
+                    var xMax = (int)(p_x.OrderByDescending(x => x).First());
+                    var yMin = (int)(p_y.OrderBy(x => x).First());
+                    var yMax = (int)(p_y.OrderByDescending(x => x).First());
+                    var minP = new Ge.Point3d(xMin, yMin, 0);
+                    var maxP = new Ge.Point3d(xMax, yMax, 0);
+                    int width = (int)(maxP.X) - (int)(minP.X) + 100;
+                    int height = (int)(maxP.Y) - (int)(minP.Y) + 100;
+                    var leftTop = new Ge.Point3d(minP.X, minP.Y + height, 0);
+                    var rightBottom = new Ge.Point3d(maxP.X, maxP.Y - height, 0);
+                    int interval = 10;
+
+                    List<Ge.Point3d> outlines = new List<Ge.Point3d>();
+                    List<Ge.Point3d> outlinesModified = new List<Ge.Point3d>();
+                    foreach (Entity entity in ents)
+                    {
+                        if (entity is Curve curve)
+                        {
+                            var distance = curve.GetDistanceAtParameter(curve.EndParam)
+                                - curve.GetDistanceAtParameter(curve.StartParam);
+                            int n = (int)distance / interval; // 整数除法只保留整数部分
+
+                            for (int i = 0; i <= n; i++)
+                            {
+                                var p = curve.GetPointAtDist(i * interval);
+                                outlines.Add(p);
+                                var pM = new Ge.Point3d(p.X - leftTop.X, -p.Y + leftTop.Y, 0);
+                                outlinesModified.Add(pM);
+                            }
+
+
+                        }
+                    }
+                    // 创建一个指定大小的白色画布,好像画布的面积不能特别大
+                    Mat image = new Mat(new OpenCvSharp.Size(width, height), MatType.CV_8UC3, new Scalar(255, 255, 255));
+                    foreach (var p in outlinesModified)
+                    {
+                        var px = (int)p.X; var py = (int)p.Y;
+                        if (px >= width || py >= height) continue;
+                        image.Set<Vec3b>(py, px, new Vec3b(0, 0, 0));
+
+                    }
+
+
+                    // 查找图像中的轮廓
+                    Mat imageGray = new Mat();
+                    Mat binaryImage = new Mat();
+                    Mat imgEroded = new Mat();
+                    Cv2.CvtColor(image, imageGray, ColorConversionCodes.BGR2GRAY);
+                    var size = new OpenCvSharp.Size(10, 10);
+                    Mat element = Cv2.GetStructuringElement(MorphShapes.Rect, size);
+                    Cv2.Erode(imageGray, imgEroded, element, null, 1);
+                    Cv2.AdaptiveThreshold(imgEroded, binaryImage, 255, AdaptiveThresholdTypes.MeanC, ThresholdTypes.BinaryInv, 11, 2);
+
+                    OpenCvSharp.Point[][] contours;
+                    HierarchyIndex[] hierarchy;
+                    List<OpenCvSharp.Point[]> wantedContours = new List<OpenCvSharp.Point[]>();
+
+                    Cv2.FindContours(binaryImage, out contours, out hierarchy, RetrievalModes.List, ContourApproximationModes.ApproxNone);
+
+                    // 找寻特定轮廓
+                    foreach (var contour in contours)
+                    {
+                        var rect = Cv2.BoundingRect(contour);
+                        var area = Cv2.ContourArea(contour);
+
+                        var area_rect = rect.Width * rect.Height;
+                        var areaRadio = area / area_rect;
+                        if (0.95 < areaRadio && areaRadio < 1.1 
+                            && area>7200)
+                        {
+                            wantedContours.Add(contour);
+                        }
+                    }
+
+                    // 将图片的像素轮廓转换为cad的point3d点
+                    List<List<Ge.Point3d>> contours_cad = new List<List<Ge.Point3d>>();
+                    foreach (var contour in wantedContours)
+                    {
+                        List<Ge.Point3d> contour_cad = new List<Ge.Point3d>();
+
+                        foreach (var point in contour)
+                        {
+                            Ge.Point3d point3d = new Ge.Point3d(
+                                point.X + leftTop.X,
+                                -point.Y + leftTop.Y,
+                                0
+                                );
+                            contour_cad.Add(point3d);
+                        }
+                        contours_cad.Add(contour_cad);
+
+                    }
+                    // 7、在cad中画出轮廓线
+                    List<Polyline> polylines = new List<Polyline>();
+                    foreach (var contour_cad in contours_cad)
+                    {
+                        Polyline polyline = new Polyline();
+                        for (int i = 0; i < contour_cad.Count; i++)
+                        {
+                            polyline.AddVertexAt(i, new Ge.Point2d(contour_cad[i].X, contour_cad[i].Y), 0, 0, 0);
+                        }
+                        polyline.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByColor, 1);
+                        polyline.Closed = true;
+                        polylines.Add(polyline);
+                        ToModelSpace(polyline, doc.Database);
+                    }
+
+                }
+
+
+
+
+
+            }
+            catch (System.Exception ex)
+            {
+                string msg = "报错为：" + ex.Message + "\n" + "位置为：" + ex.StackTrace;
+                editor.WriteMessage($"\n{msg}");
+            }
+
+        }
+        public static ObjectId ToModelSpace(Entity entity, Database database)
+        {
+            ObjectId objectId;
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForWrite, false);
+                BlockTableRecord blockTableRecord = (BlockTableRecord)trans.GetObject(blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite, false);
+                objectId = blockTableRecord.AppendEntity(entity);
+                trans.AddNewlyCreatedDBObject(entity, true);
+                trans.Commit();
+            }
+            return objectId;
+        }
+        public static List<Entity> GetEntitiesInSelection(Document doc)
+        {
+            // 获取当前文档编辑器
+            Editor editor = doc.Editor;
+
+            // 提示用户进行框选操作
+            PromptSelectionResult selectionResult = editor.GetSelection();
+
+            if (selectionResult.Status != PromptStatus.OK)
+            {
+                editor.WriteMessage("Failed to select objects.");
+                return null;
+            }
+
+            // 获取选择集
+            SelectionSet selectionSet = selectionResult.Value;
+
+            // 创建实体列表
+            List<Entity> entities = new List<Entity>();
+
+            using (Transaction transaction = doc.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId objectId in selectionSet.GetObjectIds())
+                {
+                    // 获取实体对象
+                    Entity entity = transaction.GetObject(objectId, OpenMode.ForRead) as Entity;
+
+                    if (entity != null)
+                    {
+                        entities.Add(entity);
+                    }
+                }
+
+                transaction.Commit();
+            }
+
+            return entities;
+        }
+
+    }
+}
