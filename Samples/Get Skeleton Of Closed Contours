@@ -1,0 +1,185 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Runtime;
+using Ge = Autodesk.AutoCAD.Geometry;
+using OpenCvSharp;
+using OpenCVSharp_Test.Function;
+using System.Collections.Generic;
+using System.Linq;
+using Application = Autodesk.AutoCAD.ApplicationServices.Application;
+using OpenCvSharp.XImgProc;
+using Mat = OpenCvSharp.Mat;
+using InputArray = OpenCvSharp.InputArray;
+
+
+namespace OpenCVSharp_Test
+{
+    public class GetSkeletonOfClosedContours // 中轴线又叫骨架
+    {
+        [CommandMethod("gujia")]
+        public void Run()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor editor = doc.Editor;
+            Database db = HostApplicationServices.WorkingDatabase;
+
+
+            try
+            {
+
+                using (doc.LockDocument())
+                {
+                    var ents = BasicFunction.GetEntitiesInSelection(doc);
+
+                    List<Extents3d> extensions = ents.Select(x => x.GeometricExtents).ToList();
+                    List<Autodesk.AutoCAD.Geometry.Point3d> points = new List<Autodesk.AutoCAD.Geometry.Point3d>();
+                    foreach (Extents3d item in extensions)
+                    {
+                        Autodesk.AutoCAD.Geometry.Point3d p1 = item.MinPoint;
+                        Autodesk.AutoCAD.Geometry.Point3d p2 = item.MaxPoint;
+                        points.Add(p1);
+                        points.Add(p2);
+                    }
+                    List<double> p_x = points.Select(x => x.X).ToList();
+                    List<double> p_y = points.Select(y => y.Y).ToList();
+                    var xMin = (int)(p_x.OrderBy(x => x).First());
+                    var xMax = (int)(p_x.OrderByDescending(x => x).First());
+                    var yMin = (int)(p_y.OrderBy(x => x).First());
+                    var yMax = (int)(p_y.OrderByDescending(x => x).First());
+                    var minP = new Autodesk.AutoCAD.Geometry.Point3d(xMin, yMin, 0);
+                    var maxP = new Autodesk.AutoCAD.Geometry.Point3d(xMax, yMax, 0);
+                    var margin = 10;
+                    int width = (int)(maxP.X) - (int)(minP.X) 
+                        +2 * margin;
+                    int height = (int)(maxP.Y) - (int)(minP.Y) 
+                        + 2 * margin;
+                    var 左上角点 = new Autodesk.AutoCAD.Geometry.Point3d(minP.X, minP.Y + height, 0);
+                    var 右下角点 = new Autodesk.AutoCAD.Geometry.Point3d(maxP.X, maxP.Y - height, 0);
+
+                    int interval = 10;
+
+                    List<OpenCvSharp.Point[]> contours = new List<Point[]>();
+                    foreach (Entity entity in ents)
+                    {
+                        if (entity is Curve curve)
+                        {
+                            var distance = curve.GetDistanceAtParameter(curve.EndParam)
+                                - curve.GetDistanceAtParameter(curve.StartParam);
+                            int n = (int)distance / interval; // 整数除法只保留整数部分
+                            List<OpenCvSharp.Point> temp = new List<Point>();
+                            for (int i = 0; i <= n; i++)
+                            {
+                                var p = curve.GetPointAtDist(i * interval);
+                                var pM = new Autodesk.AutoCAD.Geometry.Point3d(
+                                    p.X - 左上角点.X + margin,
+                                    -p.Y + 左上角点.Y - margin,
+                                    0
+                                    );
+                                temp.Add(new OpenCvSharp.Point(pM.X, pM.Y));
+                            }
+                            contours.Add(temp.ToArray());
+
+
+                        }
+                    }
+
+
+                    List<OpenCvSharp.Point[]> contoursBone = new List<OpenCvSharp.Point[]>(); // 骨架
+                    foreach (var contour in contours)
+                    {
+
+                        Mat bone = new Mat();
+                        OpenCvSharp.Rect boundingRect = new OpenCvSharp.Rect((int)左上角点.X, (int)左上角点.Y, width, height);
+                        bone.Create(boundingRect.Size, MatType.CV_8UC1);    // 创建bone图像的格式和尺寸
+                        bone.SetTo(0); // 将图像填充为黑色
+
+                        // 在图像上绘制封闭轮廓
+                        Cv2.DrawContours(bone, new Point[][] { contour }, -1, 255, -1);
+
+                        // 对二值图像进行细化处理，得到骨架
+                        Mat skeleton = new Mat();
+                        CvXImgProc.Thinning(bone, skeleton, ThinningTypes.GUOHALL);
+                        List<OpenCvSharp.Point> skeletonPoints = new List<Point>();
+                        Cv2.ImShow("a show", bone);
+                        Cv2.WaitKey(0);
+                        Cv2.DestroyAllWindows();
+
+                        // 遍历骨架图像，找到非零像素点，将其添加到List中
+                        for (int y = 0; y < skeleton.Rows; y++)
+                        {
+                            for (int x = 0; x < skeleton.Cols; x++)
+                            {
+                                if (skeleton.Get<byte>(y, x) != 0)
+                                {
+                                    skeletonPoints.Add(new OpenCvSharp.Point(x, y));
+                                }
+                            }
+                        }
+                        // 将List转换为Point数组
+                        Point[] skeletonArray = skeletonPoints.ToArray();
+                        contoursBone.Add(skeletonArray);
+
+                    }
+
+
+
+
+                    // 将图片的像素轮廓转换为cad的point3d点
+                    List<List<Ge.Point3d>> contours_cad = new List<List<Ge.Point3d>>();
+                    foreach (var contour in contoursBone)
+                    {
+                        List<Ge.Point3d> contour_cad = new List<Ge.Point3d>();
+
+                        foreach (var point in contour)
+                        {
+                            Ge.Point3d point3d = new Ge.Point3d(
+                                point.X + 左上角点.X - margin,
+                                -point.Y + 左上角点.Y - margin,
+                                0
+                                );
+                            contour_cad.Add(point3d);
+                        }
+                        contours_cad.Add(contour_cad);
+
+                    }
+
+                    // 7、在cad中画出轮廓线
+
+                    //List<Polyline> polylines = new List<Polyline>();
+                    //foreach (var contour_cad in contours_cad)
+                    //{
+                    //    Polyline polyline = new Polyline();
+                    //    for (int i = 0; i < contour_cad.Count; i++)
+                    //    {
+                    //        polyline.AddVertexAt(i, new Ge.Point2d(contour_cad[i].X, contour_cad[i].Y), 0, 0, 0);
+                    //    }
+                    //    polyline.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByColor, 1);
+                    //    polyline.Closed = false;
+                    //    polylines.Add(polyline);
+                    //    BasicFunction.ToModelSpace(doc, polyline);
+                    //}
+                    // 8、在cad中画出点集
+                    foreach (var contour_cad in contours_cad)
+                    {
+                        BasicFunction.DrawPointViaPointListNoText(doc, contour_cad, "0");
+                        break;
+                    }
+
+                }
+
+
+
+
+
+            }
+            catch (System.Exception ex)
+            {
+                string msg = "报错为：" + ex.Message + "\n" + "位置为：" + ex.StackTrace;
+                BasicFunction.WriteMessage(doc, msg);
+            }
+
+        }
+
+    }
+}
