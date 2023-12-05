@@ -1,0 +1,138 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Runtime;
+using Ge = Autodesk.AutoCAD.Geometry;
+using OpenCvSharp;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Forms;
+using Application = Autodesk.AutoCAD.ApplicationServices.Application;
+using OpenCVSharp_Test.Function;
+
+namespace FirstTestOfCadRedevelop
+{
+    public class GetRotatedBoundingBox
+    {
+        [CommandMethod("hezi")]
+        public void Run()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor editor = doc.Editor;
+            Database db = HostApplicationServices.WorkingDatabase;
+
+
+            try
+            {
+
+                using (doc.LockDocument())
+                {
+                    // 获取实体集合
+                    var ents = GetEntitiesInSelection(doc);
+
+                    // 对实体中的曲线进行分割，并且获得分割点的坐标
+                    int interval = 10; // 每小段曲线的长度
+                    List<Point2f> point2fsOpenCv = new List<Point2f>();
+                    foreach (Entity entity in ents)
+                    {
+                        if (entity is Curve curve)
+                        {
+                            var distance = curve.GetDistanceAtParameter(curve.EndParam)
+                                - curve.GetDistanceAtParameter(curve.StartParam);
+
+                            int n = (int)distance / interval;
+                            for (int i = 0; i <= n; i++)
+                            {
+                                var p = curve.GetPointAtDist(i * interval);
+                                var pf = new Point2f((float)p.X, (float)p.Y);
+                                point2fsOpenCv.Add(pf);
+                            }
+                        }
+                    }
+
+                    // 通过opencv计算可旋转矩形
+                    RotatedRect rRect = Cv2.MinAreaRect(point2fsOpenCv);
+                    Point2f[] verticesCv = rRect.Points();
+                    List<Ge.Point3d> verticesCad = new List<Ge.Point3d>();
+                    foreach (var item in verticesCv)
+                    {
+                        Ge.Point3d p = new Ge.Point3d(item.X, item.Y,0);
+                        verticesCad.Add(p);
+                    }
+
+                    // 在cad中画出可旋转矩形
+                    Polyline polyline = new Polyline();
+                    for (int i = 0; i < verticesCad.Count; i++)
+                    {
+                        polyline.AddVertexAt(i, new Ge.Point2d(verticesCad[i].X, verticesCad[i].Y), 0, 0, 0);
+                    }
+                    polyline.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByColor, 1);
+                    polyline.Closed = true;
+                    ToModelSpace(polyline, doc.Database);
+                    
+
+                }
+
+
+
+
+
+            }
+            catch (System.Exception ex)
+            {
+                string msg = "报错为：" + ex.Message + "\n" + "位置为：" + ex.StackTrace;
+                editor.WriteMessage($"\n{msg}");
+            }
+
+        }
+        public static ObjectId ToModelSpace(Entity entity, Database database)
+        {
+            ObjectId objectId;
+            using (Transaction trans = database.TransactionManager.StartTransaction())
+            {
+                BlockTable blockTable = (BlockTable)trans.GetObject(database.BlockTableId, OpenMode.ForWrite, false);
+                BlockTableRecord blockTableRecord = (BlockTableRecord)trans.GetObject(blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite, false);
+                objectId = blockTableRecord.AppendEntity(entity);
+                trans.AddNewlyCreatedDBObject(entity, true);
+                trans.Commit();
+            }
+            return objectId;
+        }
+        public static List<Entity> GetEntitiesInSelection(Document doc)
+        {
+            Editor editor = doc.Editor;
+            PromptSelectionResult selectionResult = editor.GetSelection();
+
+            if (selectionResult.Status != PromptStatus.OK)
+            {
+                editor.WriteMessage("Failed to select objects.");
+                return null;
+            }
+            SelectionSet selectionSet = selectionResult.Value;
+            List<Entity> entities = new List<Entity>();
+            using (Transaction transaction = doc.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId objectId in selectionSet.GetObjectIds())
+                {
+                    Entity entity = transaction.GetObject(objectId, OpenMode.ForRead) as Entity;
+
+                    if (entity != null)
+                    {
+                        entities.Add(entity);
+                    }
+                }
+
+                transaction.Commit();
+            }
+
+            return entities;
+        }
+
+
+    }
+}
